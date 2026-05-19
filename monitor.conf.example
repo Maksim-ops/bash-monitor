@@ -1,0 +1,59 @@
+# Copy this file to monitor.conf and change the values below.
+
+TELEGRAM_BOT_TOKEN="123456789:replace-me"
+TELEGRAM_CHAT_ID="-1001234567890"
+
+# Optional settings.
+# TELEGRAM_MESSAGE_THREAD_ID="42"
+# TELEGRAM_DISABLE_NOTIFICATION=1
+# LOG_FILE="/var/log/lifeorient-monitor.log"
+ALERT_PREFIX="[lifeorient-monitor]"
+HOSTNAME_LABEL="prod-server-1"
+STATE_DIR="${SCRIPT_DIR}/.monitor-state"
+
+EXPECTED_HTTP_STATUS=200
+HTTP_FAILURE_THRESHOLD=3
+HTTP_TIMEOUT=10
+DISK_USAGE_THRESHOLD=90
+CPU_USAGE_THRESHOLD=90
+MEMORY_USAGE_THRESHOLD=90
+RESOURCE_FAILURE_THRESHOLD=3
+CPU_SAMPLE_SECONDS=1
+LOG_INITIAL_LOOKBACK_SECONDS=300
+
+# Container checks.
+add_container_check "nginx_container" "nginx" "Docker: nginx"
+add_container_check "php_fpm_container" "php-fpm" "Docker: php-fpm"
+
+# Optional health checks for containers that define Docker HEALTHCHECK.
+# Leave them disabled unless the container really exposes health status.
+# add_container_health_check "nginx_health" "nginx" "Docker health: nginx" 1
+
+# HTTP checks.
+add_http_check "frontend_health" "http://127.0.0.1:8080/health" "HTTP: frontend health" 200 3 10
+add_http_check "api_health" "http://127.0.0.1:8081/health" "HTTP: api health" 200 3 10
+
+# DB checks. The command should return empty output when everything is fine.
+# If match_regex is empty, any non-empty output triggers an alert.
+# Use -N -B for mysql so the output stays compact.
+add_db_check \
+  "stuck_payments" \
+  "docker exec mysql-db env MYSQL_PWD='change-me' mysql -N -B -uroot app_db -e \"SELECT CONCAT(id, ':', status) FROM payments WHERE status = 'STUCK' LIMIT 10\"" \
+  "MySQL: stuck payments" \
+  ""
+
+# Custom command check example for future extensions.
+# add_command_check \
+#   "custom_probe" \
+#   "curl -fsS http://127.0.0.1:8090/internal/check | grep -i 'alarm'" \
+#   "Custom: internal check" \
+#   ""
+
+# Disk usage.
+add_disk_check "root_disk" "/" "Disk: /" 90
+
+# Host CPU and memory.
+add_resource_check "host_resources" "Host resources" 90 90 3
+
+# Log monitoring. The script inspects only new log lines since the previous run.
+add_log_check "php_exceptions" "php-fpm" "exception|fatal error|traceback" "Logs: php-fpm exceptions" 1 300

@@ -1,0 +1,4 @@
+monitor.conf
+.monitor-state/
+*.state
+*.log
