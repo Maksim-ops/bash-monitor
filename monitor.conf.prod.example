@@ -9,9 +9,9 @@ LOG_FILE="/var/log/lifeorient-monitor.log"
 EXPECTED_HTTP_STATUS=200
 HTTP_FAILURE_THRESHOLD=3
 HTTP_TIMEOUT=15
-DISK_USAGE_THRESHOLD=90
+DISK_USAGE_THRESHOLD=95
 CPU_USAGE_THRESHOLD=90
-MEMORY_USAGE_THRESHOLD=90
+MEMORY_USAGE_THRESHOLD=95
 RESOURCE_FAILURE_THRESHOLD=3
 CPU_SAMPLE_SECONDS=1
 LOG_INITIAL_LOOKBACK_SECONDS=300
@@ -22,21 +22,20 @@ add_container_check "reports_nginx" "reports-nginx" "Docker: reports-nginx"
 add_container_check "reports_web" "reports-web" "Docker: reports-web"
 add_container_check "reports_php" "reports-php" "Docker: reports-php"
 add_container_check "reports_db" "reports-db" "Docker: reports-db"
+add_container_check "redirect" "redirect" "Docker: redirect"
 add_container_check "lifeorient" "lifeorient" "Docker: lifeorient"
+add_container_check "lifeorient_nginx" "lifeorient-nginx" "Docker: lifeorient-nginx"
 add_container_check "lifeorient_db" "lifeorient-db" "Docker: lifeorient-db"
+add_container_check "lifeorient_redirect" "lifeorient_redirect" "Docker: lifeorient_redirect"
 add_container_check "messenger_nginx" "messenger-nginx" "Docker: messenger-nginx"
 add_container_check "messenger_php" "messenger-php" "Docker: messenger-php"
 add_container_check "messenger_worker" "messenger-worker" "Docker: messenger-worker"
+add_container_check "mp3" "mp3" "Docker: mp3 (j316.ru)"
 
 add_http_check "lifeorient_home" "https://lifeorient.org" "HTTP: lifeorient.org" 200 3 15
 add_http_check "reports_home" "https://reports.lifeorient.org" "HTTP: reports.lifeorient.org" 200 3 15
 add_http_check "reports_api" "https://api.reports.lifeorient.org" "HTTP: api.reports.lifeorient.org" 401 3 15
+add_http_check "j316_home" "https://j316.ru" "HTTP: j316.ru" 302 3 15
 
-add_db_check \
-  "reports_db_dev_recent_message_statuses" \
-  "docker exec reports-db-dev env MYSQL_PWD='replace-me' mysql -N -B -uroot reports -e 'SELECT * FROM messages WHERE statuses IN (06, 60, 66) AND \`updated_at\` >= NOW() - INTERVAL 1 MINUTE'" \
-  "MySQL: reports-db-dev messages with statuses 06/60/66 in the last minute" \
-  ""
-
-add_disk_check "root_disk" "/" "Disk: /" 90
-add_resource_check "host_resources" "Host resources" 90 90 3
+add_disk_check "root_disk" "/" "Disk: /" 95
+add_resource_check "host_resources" "Host resources" 90 95 3

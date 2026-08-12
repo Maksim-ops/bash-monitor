@@ -210,8 +210,16 @@ build_message() {
   local check_id="$2"
   local label="$3"
   local details="$4"
+  local icon
 
-  printf '%s %s\nHost: %s\nCheck: %s (%s)\nTime: %s\n\n%s\n' \
+  case "$severity" in
+    ALERT) icon='❗' ;;
+    RESOLVED) icon='✅' ;;
+    *) icon='' ;;
+  esac
+
+  printf '%s %s %s\nHost: %s\nCheck: %s (%s)\nTime: %s\n\n%s\n' \
+    "$icon" \
     "$ALERT_PREFIX" \
     "$severity" \
     "$HOSTNAME_LABEL" \
