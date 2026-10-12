@@ -681,7 +681,14 @@ run_file_error_check() {
   local include_regex="${CHECK_PARAM_2[$check_id]}"
   local exclude_regex="${CHECK_PARAM_3[$check_id]}"
   local label="${CHECK_LABEL[$check_id]}"
-  local total_lines cursor new_lines="" matched_lines="" match_count=0
+  local is_first_run=0 file_size cursor new_content="" matched_lines="" match_count=0
+
+  # Checked before load_state (which would otherwise create/initialize the
+  # state transparently) so we can tell "never run before" apart from "ran
+  # before, cursor just happens to be 0".
+  if [[ ! -f "$(state_file_for "$check_id")" ]]; then
+    is_first_run=1
+  fi
 
   load_state "$check_id"
 
@@ -690,33 +697,45 @@ run_file_error_check() {
     return
   fi
 
-  total_lines="$(wc -l < "$file_path" 2>/dev/null || printf '0')"
-  total_lines="${total_lines//[[:space:]]/}"
-  [[ "$total_lines" =~ ^[0-9]+$ ]] || total_lines=0
+  # Byte size, not line count: on GNU coreutils `wc -c` on a regular file is
+  # an O(1) metadata read (no need to scan the file), and reading "new since
+  # last time" via `tail -c +N` seeks straight to that byte offset instead of
+  # scanning from the start to find "line N". Both matter once the file is
+  # large and this runs every minute from cron.
+  file_size="$(wc -c < "$file_path" 2>/dev/null || printf '0')"
+  file_size="${file_size//[[:space:]]/}"
+  [[ "$file_size" =~ ^[0-9]+$ ]] || file_size=0
+
+  if (( is_first_run )); then
+    log "First run of file-error check '$check_id': starting from the current end of '$file_path' (${file_size} bytes) without reporting anything already in it."
+    STATE_LAST_CURSOR="$file_size"
+    save_state "$check_id"
+    return
+  fi
 
   cursor="$STATE_LAST_CURSOR"
   [[ "$cursor" =~ ^[0-9]+$ ]] || cursor=0
 
-  if (( total_lines < cursor )); then
-    log "File '$file_path' has fewer lines than the saved cursor for check '$check_id' (rotated/truncated?), resetting cursor to 0."
+  if (( file_size < cursor )); then
+    log "File '$file_path' is smaller than the saved cursor for check '$check_id' (rotated/truncated?), resetting cursor to 0."
     cursor=0
   fi
 
-  if (( total_lines > cursor )); then
-    new_lines="$(tail -n "+$((cursor + 1))" "$file_path" 2>/dev/null || true)"
+  if (( file_size > cursor )); then
+    new_content="$(tail -c "+$((cursor + 1))" "$file_path" 2>/dev/null || true)"
   fi
 
   # Cursor always advances past everything we just read, whether or not it
   # matched the filters below — otherwise excluded/filtered lines would be
   # re-read (and re-considered) on every future run.
-  STATE_LAST_CURSOR="$total_lines"
+  STATE_LAST_CURSOR="$file_size"
   save_state "$check_id"
 
-  if [[ -z "$new_lines" ]]; then
+  if [[ -z "$new_content" ]]; then
     return
   fi
 
-  matched_lines="$new_lines"
+  matched_lines="$new_content"
 
   if [[ -n "$include_regex" ]]; then
     matched_lines="$(printf '%s\n' "$matched_lines" | grep -E "$include_regex" || true)"

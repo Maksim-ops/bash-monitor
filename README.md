@@ -107,7 +107,9 @@ add_file_error_check \
 - `<id>` and `<file_path>` are required; `[label]` defaults to `File errors <file_path>`.
 - `[include_regex]` (4th arg): only new lines matching this are considered. Empty means every new line.
 - `[exclude_regex]` (5th arg): new lines matching this are dropped even if `include_regex` matched — edit this to silence a specific error type without changing the app.
-- Unlike `add_log_check`, this has no ALERT/RESOLVED pairing: it simply notifies once per run that finds new matching lines (with up to ~3000 characters of them in the message), and stays silent on runs with nothing new. Reading resumes from the line after the last one it processed; if the file is shorter than last time (rotated/truncated), it starts over from line 1.
+- Unlike `add_log_check`, this has no ALERT/RESOLVED pairing: it simply notifies once per run that finds new matching lines (with up to ~3000 characters of them in the message), and stays silent on runs with nothing new.
+- First time a given check id runs, it records the file's current size and reports nothing — existing content is never dumped into a notification, only lines appended after that first run.
+- Cursor tracking is a byte offset (one small number per check in its state file), not a line count: getting the current file size and reading "everything since the saved offset" are both cheap, independent of how large the file has grown, so this is safe to run every minute from cron even against a multi-GB file. If the file is now smaller than the saved offset (rotated/truncated), it resets to the start and resumes from there.
 
 ## Notes
 
