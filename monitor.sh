@@ -80,6 +80,7 @@ Config helpers:
   add_disk_check <id> <path> [label] [usage_percent_threshold]
   add_resource_check <id> [label] [cpu_threshold] [memory_threshold] [failure_threshold]
   add_log_check <id> <container_name> <pattern> [label] [failure_threshold] [initial_lookback_seconds]
+  add_file_error_check <id> <file_path> [label] [include_regex] [exclude_regex]
 EOF
 }
 
@@ -194,6 +195,24 @@ add_log_check() {
   register_check "$id" "log" "$label" "$container_name" "$pattern" "$failure_threshold" "$initial_lookback_seconds"
 }
 
+# Not tied to any one service: point it at any plain log file on the host
+# (one event/line per entry works best, e.g. JSON-lines). Unlike add_log_check
+# (docker logs, ALERT-once-then-RESOLVED), this notifies on every run that has
+# new matching lines, which is what you want for "tell me about every new
+# error" rather than "tell me when a problem starts/stops".
+#   add_file_error_check <id> <file_path> [label] [include_regex] [exclude_regex]
+# include_regex: only lines matching this are considered (empty = all new lines).
+# exclude_regex: lines matching this are dropped even if include_regex matched
+#   (this is how you filter out specific error types you don't want pinged for).
+add_file_error_check() {
+  local id="${1:?file error check id is required}"
+  local file_path="${2:?file path is required}"
+  local label="${3:-File errors ${file_path}}"
+  local include_regex="${4:-}"
+  local exclude_regex="${5:-}"
+  register_check "$id" "file_error" "$label" "$file_path" "$include_regex" "$exclude_regex"
+}
+
 truncate_text() {
   local text="$1"
   local limit="${2:-3200}"
@@ -218,7 +237,7 @@ build_message() {
     *) icon='' ;;
   esac
 
-  printf '%s %s %s\nHost: %s\nCheck: %s (%s)\nTime: %s\n\n%s\n' \
+  printf '%s %s %s\nHost: %s\nCheck: %s (%s)\nTime: %s\n\n%b\n' \
     "$icon" \
     "$ALERT_PREFIX" \
     "$severity" \
@@ -656,6 +675,66 @@ run_log_check() {
   mark_success_loaded "$check_id" "$label" "No new log matches found in '$container_name' for pattern '${pattern}'."
 }
 
+run_file_error_check() {
+  local check_id="$1"
+  local file_path="${CHECK_PARAM_1[$check_id]}"
+  local include_regex="${CHECK_PARAM_2[$check_id]}"
+  local exclude_regex="${CHECK_PARAM_3[$check_id]}"
+  local label="${CHECK_LABEL[$check_id]}"
+  local total_lines cursor new_lines="" matched_lines="" match_count=0
+
+  load_state "$check_id"
+
+  if [[ ! -r "$file_path" ]]; then
+    log "File '$file_path' is not readable for check '$check_id', skipping this run."
+    return
+  fi
+
+  total_lines="$(wc -l < "$file_path" 2>/dev/null || printf '0')"
+  total_lines="${total_lines//[[:space:]]/}"
+  [[ "$total_lines" =~ ^[0-9]+$ ]] || total_lines=0
+
+  cursor="$STATE_LAST_CURSOR"
+  [[ "$cursor" =~ ^[0-9]+$ ]] || cursor=0
+
+  if (( total_lines < cursor )); then
+    log "File '$file_path' has fewer lines than the saved cursor for check '$check_id' (rotated/truncated?), resetting cursor to 0."
+    cursor=0
+  fi
+
+  if (( total_lines > cursor )); then
+    new_lines="$(tail -n "+$((cursor + 1))" "$file_path" 2>/dev/null || true)"
+  fi
+
+  # Cursor always advances past everything we just read, whether or not it
+  # matched the filters below — otherwise excluded/filtered lines would be
+  # re-read (and re-considered) on every future run.
+  STATE_LAST_CURSOR="$total_lines"
+  save_state "$check_id"
+
+  if [[ -z "$new_lines" ]]; then
+    return
+  fi
+
+  matched_lines="$new_lines"
+
+  if [[ -n "$include_regex" ]]; then
+    matched_lines="$(printf '%s\n' "$matched_lines" | grep -E "$include_regex" || true)"
+  fi
+
+  if [[ -n "$exclude_regex" && -n "$matched_lines" ]]; then
+    matched_lines="$(printf '%s\n' "$matched_lines" | grep -Ev "$exclude_regex" || true)"
+  fi
+
+  if [[ -z "$matched_lines" ]]; then
+    return
+  fi
+
+  match_count="$(printf '%s\n' "$matched_lines" | grep -c '.' || true)"
+
+  send_notification "ALERT" "$check_id" "$label" "Found ${match_count} new matching line(s) in '${file_path}'.\n\n$(truncate_text "$matched_lines" 3000)" || true
+}
+
 dispatch_check() {
   local check_id="$1"
   local kind="${CHECK_KIND[$check_id]}"
@@ -681,6 +760,9 @@ dispatch_check() {
       ;;
     log)
       run_log_check "$check_id"
+      ;;
+    file_error)
+      run_file_error_check "$check_id"
       ;;
     *)
       die "Unknown check kind '$kind' for '$check_id'."
