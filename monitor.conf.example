@@ -57,3 +57,20 @@ add_resource_check "host_resources" "Host resources" 90 90 3
 
 # Log monitoring. The script inspects only new log lines since the previous run.
 add_log_check "php_exceptions" "php-fpm" "exception|fatal error|traceback" "Logs: php-fpm exceptions" 1 300
+
+# File-based error monitoring: not tied to docker logs or any one service.
+# Point it at any plain log file on the host and it notifies once per run
+# that has new matching lines (not an ALERT-once/RESOLVED pair like
+# add_log_check above) — meant for "tell me about every new error", e.g. a
+# JSON-lines error/event log written by an app. Works for any number of
+# files from any number of services, one add_file_error_check per file.
+#   add_file_error_check <id> <file_path> [label] [include_regex] [exclude_regex]
+# include_regex: only consider new lines matching this (empty = all new lines).
+# exclude_regex: drop lines matching this even if include_regex matched — this
+#   is how you silence specific error types without touching the app's code.
+add_file_error_check \
+  "app_events_example" \
+  "/var/www/app/uploads/events.log" \
+  "Errors: app events" \
+  "" \
+  "\"context\":\"some_noisy_known_issue\""

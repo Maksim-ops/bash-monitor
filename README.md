@@ -18,7 +18,14 @@ Simple cron-driven monitoring in Bash for Docker containers, HTTP endpoints, MyS
 - Alerts on disk usage above a threshold.
 - Tracks host CPU and memory, with a configurable consecutive-failure threshold.
 - Scans Docker logs for a regex like `exception|fatal error`.
-- Suppresses duplicate alerts while the same problem is still active.
+- Watches any plain log file on the host (not tied to Docker or any one
+  service) and notifies about every run that has new matching lines —
+  useful for "tell me about every new error" rather than "tell me when a
+  problem starts/stops". Supports an include and an exclude regex so you
+  can filter out specific error types without touching the app.
+- Suppresses duplicate alerts while the same problem is still active
+  (this applies to the ALERT/RESOLVED-style checks above, not to the
+  file-error check, which has no "resolved" state — see below).
 - Sends a resolved message when the state returns to normal.
 
 ## Setup
@@ -85,6 +92,22 @@ add_disk_check "root_disk" "/" "Disk: /" 90
 add_resource_check "host_resources" "Host resources" 90 90 3
 add_log_check "php_exceptions" "php-fpm" "exception|fatal error|traceback" "Logs: php-fpm exceptions" 1 300
 ```
+
+File-based error log, with filtering (not tied to Docker/a specific service — any plain file works):
+
+```bash
+add_file_error_check \
+  "reports_app_errors" \
+  "/root/reports/uploads/events.log" \
+  "Errors: reports app" \
+  "" \
+  "\"context\":\"some_noisy_known_issue\""
+```
+
+- `<id>` and `<file_path>` are required; `[label]` defaults to `File errors <file_path>`.
+- `[include_regex]` (4th arg): only new lines matching this are considered. Empty means every new line.
+- `[exclude_regex]` (5th arg): new lines matching this are dropped even if `include_regex` matched — edit this to silence a specific error type without changing the app.
+- Unlike `add_log_check`, this has no ALERT/RESOLVED pairing: it simply notifies once per run that finds new matching lines (with up to ~3000 characters of them in the message), and stays silent on runs with nothing new. Reading resumes from the line after the last one it processed; if the file is shorter than last time (rotated/truncated), it starts over from line 1.
 
 ## Notes
 
