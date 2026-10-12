@@ -74,3 +74,14 @@ add_file_error_check \
   "Errors: app events" \
   "" \
   "\"context\":\"some_noisy_known_issue\""
+
+# Same file, but if the app's events.log carries a "level" field
+# ("warning"/"error"/"critical"), you can filter on severity instead of (or
+# together with) specific error types — e.g. only page for critical/error,
+# stay quiet on routine warnings like an expired token or bad login:
+# add_file_error_check \
+#   "app_events_critical_only" \
+#   "/var/www/app/uploads/events.log" \
+#   "Errors: app events (critical+error only)" \
+#   "" \
+#   "\"level\":\"warning\""
