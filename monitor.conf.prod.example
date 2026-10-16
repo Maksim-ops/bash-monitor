@@ -70,3 +70,5 @@ add_container_check "reports_helper" "reports-helper" "Docker: reports-helper"
 add_command_check "reports_helper_tg_fail" "docker logs --since 15m reports-helper 2>&1 | grep tg_probe | tail -1 | grep FAIL || true" "Bot: нет связи с Telegram (tg_probe FAIL)" "" 1
 # бот завис: за 15 минут ни одной строки tg_probe
 add_command_check "reports_helper_tg_silent" "docker logs --since 15m reports-helper 2>&1 | grep -q tg_probe || echo 'нет строк tg_probe за 15 минут: бот завис или перезапускается'" "Bot: нет проверок связи (tg_probe)" "" 2
+# docker HEALTHCHECK бота (файл /tmp/alive обновляется раз в 30 с); 3 минуты подряд не healthy — тревога
+add_container_health_check "reports_helper_health" "reports-helper" "Docker health: reports-helper" 3
