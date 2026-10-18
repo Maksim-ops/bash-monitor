@@ -53,6 +53,10 @@ declare -A CHECK_PARAM_4=()
 declare -A CHECK_PARAM_5=()
 declare -A CHECK_DEPENDS=()
 declare -A CONTAINER_INFO=()
+# id -> 1 if the check is failing right now (alert active or failed runs in a
+# row), kept in memory so dependents can look at their parents without forks.
+declare -A CHECK_FAILING=()
+DEPENDENCY_BLOCKER=""
 CONTAINER_CACHE_LOADED=0
 DRY_STATE_DIR=""
 
@@ -386,7 +390,6 @@ load_state() {
   STATE_LAST_DETAIL=""
   STATE_LAST_CURSOR=0
   STATE_LAST_SEEN=0
-  STATE_SUPPRESSED=0
   STATE_SUPPRESSED_COUNT=0
   STATE_SUPPRESSED_SAMPLE=""
 
@@ -399,7 +402,6 @@ load_state() {
     STATE_LAST_DETAIL="${LAST_DETAIL:-}"
     STATE_LAST_CURSOR="${LAST_CURSOR:-0}"
     STATE_LAST_SEEN="${LAST_SEEN:-0}"
-    STATE_SUPPRESSED="${SUPPRESSED:-0}"
     STATE_SUPPRESSED_COUNT="${SUPPRESSED_COUNT:-0}"
     STATE_SUPPRESSED_SAMPLE="${SUPPRESSED_SAMPLE:-}"
   fi
@@ -418,42 +420,40 @@ save_state() {
     printf 'LAST_DETAIL=%q\n' "$STATE_LAST_DETAIL"
     printf 'LAST_CURSOR=%q\n' "$STATE_LAST_CURSOR"
     printf 'LAST_SEEN=%q\n' "$STATE_LAST_SEEN"
-    printf 'SUPPRESSED=%q\n' "$STATE_SUPPRESSED"
     printf 'SUPPRESSED_COUNT=%q\n' "$STATE_SUPPRESSED_COUNT"
     printf 'SUPPRESSED_SAMPLE=%q\n' "$STATE_SUPPRESSED_SAMPLE"
   } > "$tmp_file"
 
   mv "$tmp_file" "$state_file"
+
+  if [[ "$STATE_ACTIVE" == "1" ]] || (( STATE_FAIL_COUNT > 0 )); then
+    CHECK_FAILING["$1"]=1
+  else
+    CHECK_FAILING["$1"]=0
+  fi
 }
 
-# Prints the id of the first failing parent of a check (nothing if it has no
-# dependencies or none of them is failing). "Failing" = alert active or at least
-# one failed run in a row, so dependents stay quiet even before the parent's own
-# threshold is reached.
-failing_dependency() {
+# Sets DEPENDENCY_BLOCKER to the id of the first failing parent of a check (empty
+# if it has no dependencies or none of them is failing). "Failing" = alert
+# active or at least one failed run in a row, so dependents stay quiet even
+# before the parent's own threshold is reached. Parents always run before their
+# dependents, so CHECK_FAILING is already up to date for this run.
+find_failing_dependency() {
   local check_id="$1"
   local -a parents=()
-  local parent state_file active fail_count
-  local -a state_files
+  local parent
 
+  DEPENDENCY_BLOCKER=""
   [[ -n "${CHECK_DEPENDS[$check_id]:-}" ]] || return 0
   IFS=' ' read -r -a parents <<< "${CHECK_DEPENDS[$check_id]}"
 
   for parent in "${parents[@]}"; do
-    if [[ "${CHECK_KIND[$parent]:-}" == "resource" ]]; then
-      state_files=("$(state_file_for "${parent}.cpu")" "$(state_file_for "${parent}.memory")")
-    else
-      state_files=("$(state_file_for "$parent")")
+    if [[ "${CHECK_FAILING[$parent]:-0}" == "1" \
+       || "${CHECK_FAILING[${parent}.cpu]:-0}" == "1" \
+       || "${CHECK_FAILING[${parent}.memory]:-0}" == "1" ]]; then
+      DEPENDENCY_BLOCKER="$parent"
+      return 0
     fi
-
-    for state_file in "${state_files[@]}"; do
-      [[ -f "$state_file" ]] || continue
-      IFS=' ' read -r active fail_count < <(source "$state_file" >/dev/null 2>&1; printf '%s %s' "${ACTIVE:-0}" "${FAIL_COUNT:-0}")
-      if [[ "$active" == "1" ]] || (( ${fail_count:-0} > 0 )); then
-        printf '%s' "$parent"
-        return 0
-      fi
-    done
   done
 }
 
@@ -927,40 +927,39 @@ validate_dependencies() {
 # A check whose parent (depends_on) is failing is not run at all: it would fail
 # for the same reason (and HTTP checks would just wait for their timeouts). Its
 # state is left untouched, so it starts counting again once the parent is back.
-# SUPPRESSED=1 in its state marks "currently skipped" so that the skip is logged
-# (and journaled) once per outage, not every minute.
+# A "<id>.skipped" marker file makes the skip get logged (and journaled) once
+# per outage, not every minute.
 skip_dependent_check() {
   local check_id="$1"
   local blocker="$2"
+  local marker="${STATE_DIR}/${check_id}.skipped"
 
-  load_state "$check_id"
-  if [[ "$STATE_SUPPRESSED" != "1" ]]; then
-    STATE_SUPPRESSED=1
+  CHECK_FAILING["$check_id"]=1   # dependents of a skipped check are skipped too
+  if [[ ! -e "$marker" ]]; then
+    : > "$marker"
     log "Check '${check_id}' skipped: dependency '${blocker}' is failing."
     record_event "SKIPPED" "$check_id" "${CHECK_LABEL[$check_id]}" "dependency:${blocker}" "Not run while '${blocker}' is failing."
-    save_state "$check_id"
   fi
 }
 
 resume_dependent_check() {
   local check_id="$1"
+  local marker="${STATE_DIR}/${check_id}.skipped"
 
-  load_state "$check_id"
-  if [[ "$STATE_SUPPRESSED" == "1" ]]; then
-    STATE_SUPPRESSED=0
+  if [[ -e "$marker" ]]; then
+    rm -f -- "$marker"
     log "Check '${check_id}' resumed: its dependencies are healthy again."
-    save_state "$check_id"
   fi
 }
 
 run_all_checks() {
-  local check_id blocker
+  local check_id
 
   for check_id in "${CHECK_ORDER[@]}"; do
     if [[ -n "${CHECK_DEPENDS[$check_id]:-}" ]]; then
-      blocker="$(failing_dependency "$check_id")"
-      if [[ -n "$blocker" ]]; then
-        skip_dependent_check "$check_id" "$blocker"
+      find_failing_dependency "$check_id"
+      if [[ -n "$DEPENDENCY_BLOCKER" ]]; then
+        skip_dependent_check "$check_id" "$DEPENDENCY_BLOCKER"
         continue
       fi
       resume_dependent_check "$check_id"
