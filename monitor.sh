@@ -91,7 +91,6 @@ Config helpers:
   add_containers <container_name>...      (id = name with '-' -> '_', label "Docker: <name>")
   depends_on <check_id> <parent_check_id>...
   add_http_check <id> <url> [label] [expected_code] [failure_threshold] [timeout_seconds]
-  add_db_check <id> <command> [label] [match_regex] [failure_threshold]
   add_command_check <id> <command> [label] [match_regex] [failure_threshold]
   add_disk_check <id> <path> [label] [usage_percent_threshold]
   add_resource_check <id> [label] [cpu_threshold] [memory_threshold] [failure_threshold]
@@ -202,10 +201,6 @@ add_command_check() {
   local match_regex="${4:-}"
   local failure_threshold="${5:-1}"
   register_check "$id" "command" "$label" "$command_string" "$match_regex" "$failure_threshold"
-}
-
-add_db_check() {
-  add_command_check "$@"
 }
 
 add_disk_check() {
@@ -783,7 +778,7 @@ run_log_check() {
   [[ "$file_size" =~ ^[0-9]+$ ]] || file_size=0
 
   if (( is_first_run )); then
-    log "First run of file-error check '$check_id': starting from the current end of '$file_path' (${file_size} bytes) without reporting anything already in it."
+    log "First run of log check '$check_id': starting from the current end of '$file_path' (${file_size} bytes) without reporting anything already in it."
     STATE_LAST_CURSOR="$file_size"
     save_state "$check_id"
     return

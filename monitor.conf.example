@@ -39,7 +39,7 @@ add_http_check "api_health" "http://127.0.0.1:8081/health" "HTTP: api health" 20
 # DB checks. The command should return empty output when everything is fine.
 # If match_regex is empty, any non-empty output triggers an alert.
 # Use -N -B for mysql so the output stays compact.
-add_db_check \
+add_command_check \
   "stuck_payments" \
   "docker exec mysql-db env MYSQL_PWD='change-me' mysql -N -B -uroot app_db -e \"SELECT CONCAT(id, ':', status) FROM payments WHERE status = 'STUCK' LIMIT 10\"" \
   "MySQL: stuck payments" \

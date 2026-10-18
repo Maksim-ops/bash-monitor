@@ -34,6 +34,20 @@ add_log_check \
   "" \
   ""
 
+# --- логи nginx и PHP ---
+# error.log nginx: каталоги /var/log/lifeorient/<имя>/ смонтированы в контейнеры.
+# Шум сканеров WordPress (access forbidden by rule / directory index forbidden — десятки тысяч строк в сутки) отфильтрован.
+add_log_check "reports_nginx_errors" "/var/log/lifeorient/reports-nginx/error.log" "Errors: reports-nginx error.log" "\[(error|crit|alert|emerg)\]"
+add_log_check "wordpress_nginx_errors" "/var/log/lifeorient/wordpress-nginx/error.log" "Errors: wordpress-nginx error.log" "\[(error|crit|alert|emerg)\]" "access forbidden by rule|directory index of .* is forbidden"
+# приложения мессенджера (сейчас в них только INFO)
+add_log_check "messenger_max_log" "/root/messenger-api/logs/max.log" "Errors: messenger max.log" "\[(WARNING|ERROR|CRITICAL)\]"
+add_log_check "messenger_telegram_log" "/root/messenger-api/logs/telegram.log" "Errors: messenger telegram.log" "\[(WARNING|ERROR|CRITICAL)\]"
+# PHP-FPM пишет только в docker logs (файла нет): фатальные ошибки, падения воркеров и нехватка pm.max_children за последние 5 минут
+# (предупреждения WordPress вроде "PHP Warning ... class-wp-site-health.php" сознательно не ловим — это шум)
+add_command_check "reports_php_errors" "docker logs --since 5m reports-php 2>&1 | grep -E 'PHP (Fatal|Parse) error|Fatal error|Uncaught|segfault|exited on signal|server reached pm\\.max_children' | cut -c1-300 | tail -3" "PHP: reports-php errors" "" 1
+add_command_check "lifeorient_php_errors" "docker logs --since 5m lifeorient 2>&1 | grep -E 'PHP (Fatal|Parse) error|Fatal error|Uncaught|segfault|exited on signal|server reached pm\\.max_children' | cut -c1-300 | tail -3" "PHP: lifeorient (WordPress) errors" "" 1
+add_command_check "messenger_php_errors" "docker logs --since 5m messenger-php 2>&1 | grep -E 'PHP (Fatal|Parse) error|Fatal error|Uncaught|segfault|exited on signal|server reached pm\\.max_children' | cut -c1-300 | tail -3" "PHP: messenger-php errors" "" 1
+
 # --- SSH-туннель к домашнему сервису (d.lifeorient.org) ---
 add_containers tunnel-nginx tunnel-cert-issuer
 # конец туннеля на VPS: если упало — проблема в SSH-туннеле или в домашнем сервисе
@@ -74,6 +88,9 @@ depends_on "tunnel_public_j316" "tunnel_endpoint" "tunnel_nginx"
 depends_on "tunnel_deep"        "tunnel_endpoint"
 depends_on "tunnel_cert_expiry"      "tunnel_nginx"
 depends_on "tunnel_cert_expiry_j316" "tunnel_nginx"
+depends_on "reports_php_errors"    "reports_php"
+depends_on "lifeorient_php_errors" "lifeorient"
+depends_on "messenger_php_errors"  "messenger_php"
 # бот-помощник
 depends_on "reports_helper_tg_fail"   "reports_helper"
 depends_on "reports_helper_tg_silent" "reports_helper"

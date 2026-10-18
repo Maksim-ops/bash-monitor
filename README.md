@@ -37,7 +37,7 @@ Simple cron-driven monitoring in Bash for Docker containers, HTTP endpoints, MyS
 2. Fill in `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, host label, and your real checks.
 3. Optionally set `LOG_FILE="/var/log/lifeorient-monitor.log"` in `monitor.conf` if you want the script itself to append run logs there.
 4. Make sure `bash`, `curl`, `docker`, `df`, `awk`, `sed`, `grep`, and optionally `flock` are installed on the server.
-5. If you query MySQL through Docker, use `docker exec ... mysql ...` inside `add_db_check`.
+5. If you query MySQL through Docker, use `docker exec ... mysql ...` inside `add_command_check`.
 
 ## Run manually
 
@@ -99,7 +99,7 @@ add_http_check "api_health" "http://127.0.0.1:8081/health" "HTTP: api health" 20
 MySQL check through a Docker container:
 
 ```bash
-add_db_check \
+add_command_check \
   "stuck_orders" \
   "docker exec mysql-db env MYSQL_PWD='change-me' mysql -N -B -uroot app_db -e \"SELECT id FROM orders WHERE status = 'STUCK' LIMIT 10\"" \
   "MySQL: stuck orders" \
@@ -148,7 +148,7 @@ While any of the listed parent checks is failing (alert active, or at least one 
 ## Notes
 
 - `add_containers name...` registers plain container checks in one line (id = name with `-` replaced by `_`, label `Docker: <name>`); `add_container_check` and `add_container_health_check` remain for custom ids/labels or when the container must be Docker-healthy. All container checks share one `docker inspect` per run.
-- `add_db_check` is just an alias for `add_command_check`, so you can reuse the same mechanism for any custom shell probe later.
+- `add_command_check` runs any shell probe (SQL through `docker exec`, `docker logs ... | grep`, a script): it alerts while the command prints something (or matches the optional regex) and resolves when the output is empty again.
 - `add_container_health_check` is meant only for containers that really define Docker `HEALTHCHECK`. If the container has no healthcheck, that monitor will alert about the missing Docker health status.
 - For DB checks, return empty output when everything is fine. Any non-empty output will fire the alert unless you pass a regex and only want matches to fire.
 - For `mysql`, prefer `env MYSQL_PWD='secret' mysql ...` instead of `-psecret`, otherwise the client writes a warning to stderr and the check will keep firing.
