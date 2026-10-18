@@ -30,7 +30,7 @@ add_resource_check "host_resources" "Host resources" 90 95 3
 
 add_log_check \
   "reports_app_events" \
-  "/root/reports/uploads/events.log" \
+  "/var/log/lifeorient/reports-php/events.log" \
   "Errors: reports app" \
   "" \
   ""
