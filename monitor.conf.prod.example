@@ -5,6 +5,7 @@ ALERT_PREFIX="[lifeorient-monitor PROD]"
 HOSTNAME_LABEL="lifeorient"
 STATE_DIR="/root/monitor/.monitor-state"
 LOG_FILE="/var/log/lifeorient-monitor.log"
+EVENTS_LOG_FILE="/var/log/lifeorient-monitor-events.log"
 
 EXPECTED_HTTP_STATUS=200
 HTTP_FAILURE_THRESHOLD=3

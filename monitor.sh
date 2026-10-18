@@ -18,6 +18,7 @@ CONFIG_FILE="${SCRIPT_DIR}/monitor.conf"
 STATE_DIR=""
 LOCK_FILE=""
 LOG_FILE="${LOG_FILE:-}"
+EVENTS_LOG_FILE="${EVENTS_LOG_FILE:-}"
 DRY_RUN=0
 
 HOSTNAME_LABEL="${HOSTNAME_LABEL:-$(hostname -f 2>/dev/null || hostname 2>/dev/null || printf 'unknown-host')}"
@@ -213,6 +214,30 @@ add_file_error_check() {
   register_check "$id" "file_error" "$label" "$file_path" "$include_regex" "$exclude_regex"
 }
 
+# Journal of every ALERT / RESOLVED the monitor decided to send, with the
+# full text of what it saw. One event per line so it can be grepped; written
+# whether or not the Telegram delivery succeeded (status=sent|failed), so the
+# file is the source of truth if a message never reached the chat.
+# No-op when EVENTS_LOG_FILE is empty (it defaults to "<LOG_FILE minus .log>-events.log").
+record_event() {
+  local severity="$1"
+  local check_id="$2"
+  local label="$3"
+  local status="$4"
+  local details="$5"
+  local line
+
+  [[ -n "${EVENTS_LOG_FILE:-}" ]] || return 0
+
+  # \n sequences come from details built with %b; real newlines from command output.
+  details="${details//\\n/ | }"
+  details="${details//$'\n'/ | }"
+
+  printf -v line '[%s] %s check=%s label="%s" host=%s status=%s details=%s\n' \
+    "$(timestamp)" "$severity" "$check_id" "$label" "$HOSTNAME_LABEL" "$status" "$details"
+  printf '%s' "$line" >> "$EVENTS_LOG_FILE" 2>/dev/null || true
+}
+
 truncate_text() {
   local text="$1"
   local limit="${2:-3200}"
@@ -265,11 +290,13 @@ send_notification() {
 
   if ! command -v curl >/dev/null 2>&1; then
     log "curl is not installed, cannot send Telegram notification for '$check_id'."
+    record_event "$severity" "$check_id" "$label" "failed" "$details"
     return 1
   fi
 
   if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
     log "Telegram settings are empty, cannot send notification for '$check_id'."
+    record_event "$severity" "$check_id" "$label" "failed" "$details"
     return 1
   fi
 
@@ -297,10 +324,12 @@ send_notification() {
 
   if ! curl "${curl_args[@]}" >/dev/null; then
     log "Telegram send failed for '$check_id'."
+    record_event "$severity" "$check_id" "$label" "failed" "$details"
     return 1
   fi
 
   log "${severity} notification sent for '${check_id}'."
+  record_event "$severity" "$check_id" "$label" "sent" "$details"
   return 0
 }
 
@@ -835,6 +864,15 @@ finalize_runtime_settings() {
   if [[ -n "${LOG_FILE:-}" ]]; then
     mkdir -p "$(dirname "$LOG_FILE")" || die "Cannot create log directory for '$LOG_FILE'."
     touch "$LOG_FILE" || die "Cannot write to LOG_FILE '$LOG_FILE'."
+  fi
+
+  if [[ -z "${EVENTS_LOG_FILE:-}" && -n "${LOG_FILE:-}" ]]; then
+    EVENTS_LOG_FILE="${LOG_FILE%.log}-events.log"
+  fi
+
+  if [[ -n "${EVENTS_LOG_FILE:-}" ]]; then
+    mkdir -p "$(dirname "$EVENTS_LOG_FILE")" || die "Cannot create log directory for '$EVENTS_LOG_FILE'."
+    touch "$EVENTS_LOG_FILE" || die "Cannot write to EVENTS_LOG_FILE '$EVENTS_LOG_FILE'."
   fi
 
   if [[ "$DRY_RUN" != "1" ]]; then
