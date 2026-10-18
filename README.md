@@ -55,6 +55,21 @@ chmod +x monitor.sh
 
 If `LOG_FILE` is set inside the config, the script also writes its own start/end and notification events to that file.
 
+## Alert journal
+
+Every ALERT and RESOLVED the monitor decides to send is also recorded, with the full text of what it saw, in a separate one-event-per-line file:
+
+```
+[2026-10-18 21:58:27 +0300] ALERT check=reports_app_events label="Errors: reports app" host=lifeorient status=sent details=Found 2 new matching line(s) ... | {"ts":...}
+[2026-10-18 21:58:27 +0300] RESOLVED check=reports_db label="Docker: reports-db" host=lifeorient status=sent details=Container 'reports-db' is running again.
+```
+
+- `status=sent` - delivered to Telegram; `status=failed` - the monitor wanted to send it but Telegram delivery failed (so the journal is the source of truth if a message never reached the chat). A failed ALERT/RESOLVED is retried on the next run and recorded again.
+- Newlines inside `details` are replaced with ` | `.
+- Path: `EVENTS_LOG_FILE` in `monitor.conf`. If it is not set but `LOG_FILE` is, it defaults to `<LOG_FILE without .log>-events.log` (e.g. `/var/log/lifeorient-monitor-events.log`). Without both, the journal is off.
+- `--dry-run` does not write to the journal.
+- Add the file to logrotate next to `LOG_FILE`.
+
 ## Config examples
 
 Container status:
