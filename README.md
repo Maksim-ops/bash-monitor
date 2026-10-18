@@ -17,16 +17,18 @@ Simple cron-driven monitoring in Bash for Docker containers, HTTP endpoints, MyS
 - Runs SQL or any shell command and alerts when the command returns output, matches a regex, or exits with an error.
 - Alerts on disk usage above a threshold.
 - Tracks host CPU and memory, with a configurable consecutive-failure threshold.
-- Scans Docker logs for a regex like `exception|fatal error`.
-- Watches any plain log file on the host (not tied to Docker or any one
-  service) and notifies about every run that has new matching lines —
-  useful for "tell me about every new error" rather than "tell me when a
-  problem starts/stops". Supports an include and an exclude regex so you
-  can filter out specific error types without touching the app.
-- Suppresses duplicate alerts while the same problem is still active
-  (this applies to the ALERT/RESOLVED-style checks above, not to the
-  file-error check, which has no "resolved" state — see below).
+- Watches any plain log file on the host (`add_log_check`, not tied to Docker or
+  any one service) for new matching lines, with an include and an exclude regex
+  so you can filter out specific error types without touching the app. The
+  first run with new matches alerts; further lines are held back until the log
+  has been quiet for a while.
+- Suppresses duplicate alerts while the same problem is still active (this
+  includes the log check: while its alert is active, new lines are only
+  counted and listed in the journal, see below).
 - Sends a resolved message when the state returns to normal.
+- Dependencies between checks (`depends_on`): when a more general check is
+  failing (a container, the proxy, the tunnel to the home server), checks that
+  depend on it do not send their own alerts.
 
 ## Setup
 
@@ -45,7 +47,7 @@ chmod +x monitor.sh
 ./monitor.sh --config ./monitor.conf
 ```
 
-`--dry-run` prints the messages locally instead of sending them to Telegram. This is the safest way to test the config before putting it under cron.
+`--dry-run` prints the messages locally instead of sending them to Telegram. It runs against a throw-away copy of the state directory, so it never changes the real state (cursors, active alerts) and writes nothing to the alert journal: it is safe to run on the production config at any time.
 
 ## Cron example
 
@@ -109,13 +111,12 @@ Disk, resources, and logs:
 ```bash
 add_disk_check "root_disk" "/" "Disk: /" 90
 add_resource_check "host_resources" "Host resources" 90 90 3
-add_log_check "php_exceptions" "php-fpm" "exception|fatal error|traceback" "Logs: php-fpm exceptions" 1 300
 ```
 
-File-based error log, with filtering (not tied to Docker/a specific service — any plain file works):
+Log file check with filtering (not tied to Docker or a specific service — any plain file works):
 
 ```bash
-add_file_error_check \
+add_log_check \
   "reports_app_errors" \
   "/root/reports/uploads/events.log" \
   "Errors: reports app" \
@@ -126,12 +127,27 @@ add_file_error_check \
 - `<id>` and `<file_path>` are required; `[label]` defaults to `File errors <file_path>`.
 - `[include_regex]` (4th arg): only new lines matching this are considered. Empty means every new line.
 - `[exclude_regex]` (5th arg): new lines matching this are dropped even if `include_regex` matched — edit this to silence a specific error type without changing the app.
-- Unlike `add_log_check`, this has no ALERT/RESOLVED pairing: it simply notifies once per run that finds new matching lines (with up to ~3000 characters of them in the message), and stays silent on runs with nothing new.
+- Alert storm protection: the first run that finds new matching lines sends an ALERT (with up to ~3000 characters of them). While that alert is active, further matching lines are NOT sent: they are counted (and journaled as `SUPPRESSED`; the file itself keeps them). Once there were no new matching lines for `FILE_ERROR_QUIET_SECONDS` (default 600), a RESOLVED message reports how many lines were held back and the last one, and the next error alerts again. A distinct error that arrives during an active alert is therefore only seen in the file/journal and in that summary.
+- At most `FILE_ERROR_MAX_READ_BYTES` (default 5 MB) of new data are read per run (after a bigger burst only the tail is read), and only complete lines are consumed, so a line the app is still writing is never split between two runs.
 - First time a given check id runs, it records the file's current size and reports nothing — existing content is never dumped into a notification, only lines appended after that first run.
 - Cursor tracking is a byte offset (one small number per check in its state file), not a line count: getting the current file size and reading "everything since the saved offset" are both cheap, independent of how large the file has grown, so this is safe to run every minute from cron even against a multi-GB file. If the file is now smaller than the saved offset (rotated/truncated), it resets to the start and resumes from there.
 
+## Dependencies between checks
+
+```bash
+depends_on "tunnel_public" "tunnel_endpoint" "tunnel_nginx"
+```
+
+While any of the listed parent checks is failing (alert active, or at least one failed run), the dependent check does not send an ALERT. It is journaled once as `SUPPRESSED ... dependency:<parent>`. Details:
+
+- A parent counts as failing as soon as it has a failed run, even before its own failure threshold is reached, so a dependent with a lower threshold does not alert in the gap.
+- If the dependent is still failing after the parent recovers, it sends its own ALERT then. A dependent that never alerted sends no RESOLVED.
+- A parent must be registered before its dependents in the config (checks run in registration order); `monitor.sh` refuses to start otherwise, and also on unknown ids.
+- Dependencies can be chained (a parent may itself depend on another check).
+
 ## Notes
 
+- `add_containers name...` registers plain container checks in one line (id = name with `-` replaced by `_`, label `Docker: <name>`); `add_container_check` and `add_container_health_check` remain for custom ids/labels or when the container must be Docker-healthy. All container checks share one `docker inspect` per run.
 - `add_db_check` is just an alias for `add_command_check`, so you can reuse the same mechanism for any custom shell probe later.
 - `add_container_health_check` is meant only for containers that really define Docker `HEALTHCHECK`. If the container has no healthcheck, that monitor will alert about the missing Docker health status.
 - For DB checks, return empty output when everything is fine. Any non-empty output will fire the alert unless you pass a regex and only want matches to fire.

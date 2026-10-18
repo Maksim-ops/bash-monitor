@@ -31,11 +31,17 @@ CPU_USAGE_THRESHOLD="${CPU_USAGE_THRESHOLD:-90}"
 MEMORY_USAGE_THRESHOLD="${MEMORY_USAGE_THRESHOLD:-90}"
 RESOURCE_FAILURE_THRESHOLD="${RESOURCE_FAILURE_THRESHOLD:-3}"
 CPU_SAMPLE_SECONDS="${CPU_SAMPLE_SECONDS:-1}"
-LOG_INITIAL_LOOKBACK_SECONDS="${LOG_INITIAL_LOOKBACK_SECONDS:-300}"
 TELEGRAM_TIMEOUT="${TELEGRAM_TIMEOUT:-15}"
 # Seconds to wait before each retry of a failed Telegram send; the number of
 # retries is the number of values ("10 20" = up to 3 tries in total).
 TELEGRAM_RETRY_DELAYS="${TELEGRAM_RETRY_DELAYS:-10 20}"
+# file-error checks: an alert stays "active" (further new lines are only counted,
+# not sent) until no new matching lines have appeared for this many seconds.
+FILE_ERROR_QUIET_SECONDS="${FILE_ERROR_QUIET_SECONDS:-600}"
+# at most this many new bytes of a watched file are read per run
+FILE_ERROR_MAX_READ_BYTES="${FILE_ERROR_MAX_READ_BYTES:-5242880}"
+
+readonly NL=$'\n'
 
 declare -a CHECK_ORDER=()
 declare -A CHECK_KIND=()
@@ -45,6 +51,10 @@ declare -A CHECK_PARAM_2=()
 declare -A CHECK_PARAM_3=()
 declare -A CHECK_PARAM_4=()
 declare -A CHECK_PARAM_5=()
+declare -A CHECK_DEPENDS=()
+declare -A CONTAINER_INFO=()
+CONTAINER_CACHE_LOADED=0
+DRY_STATE_DIR=""
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S %z'
@@ -78,13 +88,14 @@ Options:
 Config helpers:
   add_container_check <id> <container_name> [label]
   add_container_health_check <id> <container_name> [label] [failure_threshold]
+  add_containers <container_name>...      (id = name with '-' -> '_', label "Docker: <name>")
+  depends_on <check_id> <parent_check_id>...
   add_http_check <id> <url> [label] [expected_code] [failure_threshold] [timeout_seconds]
   add_db_check <id> <command> [label] [match_regex] [failure_threshold]
   add_command_check <id> <command> [label] [match_regex] [failure_threshold]
   add_disk_check <id> <path> [label] [usage_percent_threshold]
   add_resource_check <id> [label] [cpu_threshold] [memory_threshold] [failure_threshold]
-  add_log_check <id> <container_name> <pattern> [label] [failure_threshold] [initial_lookback_seconds]
-  add_file_error_check <id> <file_path> [label] [include_regex] [exclude_regex]
+  add_log_check <id> <file_path> [label] [include_regex] [exclude_regex]
 EOF
 }
 
@@ -137,16 +148,41 @@ register_check() {
 add_container_check() {
   local id="${1:?container check id is required}"
   local container_name="${2:?container name is required}"
-  local label="${3:-Container ${container_name}}"
-  register_check "$id" "container" "$label" "$container_name"
+  local label="${3:-Docker: ${container_name}}"
+  register_check "$id" "container" "$label" "$container_name" "" "1"
 }
 
+# Like add_container_check, but the container must also report Docker health
+# "healthy" (it needs a HEALTHCHECK); failure_threshold applies to every failure.
 add_container_health_check() {
   local id="${1:?container health check id is required}"
   local container_name="${2:?container name is required}"
   local label="${3:-Docker health ${container_name}}"
   local failure_threshold="${4:-1}"
-  register_check "$id" "container_health" "$label" "$container_name" "$failure_threshold"
+  register_check "$id" "container" "$label" "$container_name" "health" "$failure_threshold"
+}
+
+# Shorthand for plain container checks: id is the name with '-' replaced by '_'.
+add_containers() {
+  local name
+  for name in "$@"; do
+    add_container_check "${name//-/_}" "$name"
+  done
+}
+
+# Alerts of <check_id> are not sent while any of the listed parent checks is
+# failing (its state is active or has failures): when a more general thing is
+# down, the checks that depend on it stay quiet. A parent must be registered
+# (run) before its dependents. If the dependent is still failing after the
+# parent recovers, it alerts then.
+depends_on() {
+  local check_id="${1:?check id is required}"
+  local parent
+  shift
+  (($# > 0)) || die "depends_on '$check_id' needs at least one parent check id."
+  for parent in "$@"; do
+    CHECK_DEPENDS["$check_id"]+="${CHECK_DEPENDS[$check_id]:+ }${parent}"
+  done
 }
 
 add_http_check() {
@@ -189,32 +225,21 @@ add_resource_check() {
   register_check "$id" "resource" "$label" "$cpu_threshold" "$memory_threshold" "$failure_threshold"
 }
 
-add_log_check() {
-  local id="${1:?log check id is required}"
-  local container_name="${2:?container name is required}"
-  local pattern="${3:?log pattern is required}"
-  local label="${4:-Logs ${container_name}}"
-  local failure_threshold="${5:-1}"
-  local initial_lookback_seconds="${6:-$LOG_INITIAL_LOOKBACK_SECONDS}"
-  register_check "$id" "log" "$label" "$container_name" "$pattern" "$failure_threshold" "$initial_lookback_seconds"
-}
-
-# Not tied to any one service: point it at any plain log file on the host
-# (one event/line per entry works best, e.g. JSON-lines). Unlike add_log_check
-# (docker logs, ALERT-once-then-RESOLVED), this notifies on every run that has
-# new matching lines, which is what you want for "tell me about every new
-# error" rather than "tell me when a problem starts/stops".
-#   add_file_error_check <id> <file_path> [label] [include_regex] [exclude_regex]
+# Watches any plain log file on the host (one event/line per entry works best,
+# e.g. JSON-lines). The first run that finds new matching lines sends an ALERT;
+# while that alert is active further lines are only counted, and after
+# FILE_ERROR_QUIET_SECONDS without new matches a RESOLVED summary is sent.
+#   add_log_check <id> <file_path> [label] [include_regex] [exclude_regex]
 # include_regex: only lines matching this are considered (empty = all new lines).
 # exclude_regex: lines matching this are dropped even if include_regex matched
 #   (this is how you filter out specific error types you don't want pinged for).
-add_file_error_check() {
-  local id="${1:?file error check id is required}"
+add_log_check() {
+  local id="${1:?log check id is required}"
   local file_path="${2:?file path is required}"
   local label="${3:-File errors ${file_path}}"
   local include_regex="${4:-}"
   local exclude_regex="${5:-}"
-  register_check "$id" "file_error" "$label" "$file_path" "$include_regex" "$exclude_regex"
+  register_check "$id" "log" "$label" "$file_path" "$include_regex" "$exclude_regex"
 }
 
 # Journal of every ALERT / RESOLVED the monitor decided to send, with the
@@ -231,11 +256,10 @@ record_event() {
   local attempts="${6:-1}"
   local line
 
-  [[ -n "${EVENTS_LOG_FILE:-}" ]] || return 0
+  [[ -n "${EVENTS_LOG_FILE:-}" && "$DRY_RUN" != "1" ]] || return 0
 
-  # \n sequences come from details built with %b; real newlines from command output.
-  details="${details//\\n/ | }"
-  details="${details//$'\n'/ | }"
+  details="${details//${NL}${NL}/ | }"
+  details="${details//${NL}/ | }"
 
   printf -v line '[%s] %s check=%s label="%s" host=%s status=%s attempts=%s details=%s\n' \
     "$(timestamp)" "$severity" "$check_id" "$label" "$HOSTNAME_LABEL" "$status" "$attempts" "$details"
@@ -266,7 +290,7 @@ build_message() {
     *) icon='' ;;
   esac
 
-  printf '%s %s %s\nHost: %s\nCheck: %s (%s)\nTime: %s\n\n%b\n' \
+  printf '%s %s %s\nHost: %s\nCheck: %s (%s)\nTime: %s\n\n%s\n' \
     "$icon" \
     "$ALERT_PREFIX" \
     "$severity" \
@@ -366,6 +390,9 @@ load_state() {
   STATE_LAST_DETAIL=""
   STATE_LAST_CURSOR=0
   STATE_LAST_SEEN=0
+  STATE_SUPPRESSED=0
+  STATE_SUPPRESSED_COUNT=0
+  STATE_SUPPRESSED_SAMPLE=""
 
   state_file="$(state_file_for "$1")"
   if [[ -f "$state_file" ]]; then
@@ -376,6 +403,9 @@ load_state() {
     STATE_LAST_DETAIL="${LAST_DETAIL:-}"
     STATE_LAST_CURSOR="${LAST_CURSOR:-0}"
     STATE_LAST_SEEN="${LAST_SEEN:-0}"
+    STATE_SUPPRESSED="${SUPPRESSED:-0}"
+    STATE_SUPPRESSED_COUNT="${SUPPRESSED_COUNT:-0}"
+    STATE_SUPPRESSED_SAMPLE="${SUPPRESSED_SAMPLE:-}"
   fi
 }
 
@@ -392,9 +422,43 @@ save_state() {
     printf 'LAST_DETAIL=%q\n' "$STATE_LAST_DETAIL"
     printf 'LAST_CURSOR=%q\n' "$STATE_LAST_CURSOR"
     printf 'LAST_SEEN=%q\n' "$STATE_LAST_SEEN"
+    printf 'SUPPRESSED=%q\n' "$STATE_SUPPRESSED"
+    printf 'SUPPRESSED_COUNT=%q\n' "$STATE_SUPPRESSED_COUNT"
+    printf 'SUPPRESSED_SAMPLE=%q\n' "$STATE_SUPPRESSED_SAMPLE"
   } > "$tmp_file"
 
   mv "$tmp_file" "$state_file"
+}
+
+# Prints the id of the first failing parent of a check (nothing if it has no
+# dependencies or none of them is failing). "Failing" = alert active or at least
+# one failed run in a row, so dependents stay quiet even before the parent's own
+# threshold is reached.
+failing_dependency() {
+  local check_id="$1"
+  local -a parents=()
+  local parent state_file active fail_count
+  local -a state_files
+
+  [[ -n "${CHECK_DEPENDS[$check_id]:-}" ]] || return 0
+  IFS=' ' read -r -a parents <<< "${CHECK_DEPENDS[$check_id]}"
+
+  for parent in "${parents[@]}"; do
+    if [[ "${CHECK_KIND[$parent]:-}" == "resource" ]]; then
+      state_files=("$(state_file_for "${parent}.cpu")" "$(state_file_for "${parent}.memory")")
+    else
+      state_files=("$(state_file_for "$parent")")
+    fi
+
+    for state_file in "${state_files[@]}"; do
+      [[ -f "$state_file" ]] || continue
+      IFS=' ' read -r active fail_count < <(source "$state_file" >/dev/null 2>&1; printf '%s %s' "${ACTIVE:-0}" "${FAIL_COUNT:-0}")
+      if [[ "$active" == "1" ]] || (( ${fail_count:-0} > 0 )); then
+        printf '%s' "$parent"
+        return 0
+      fi
+    done
+  done
 }
 
 mark_failure_loaded() {
@@ -402,14 +466,23 @@ mark_failure_loaded() {
   local label="$2"
   local failure_threshold="$3"
   local details="$4"
+  local blocker
 
   STATE_FAIL_COUNT=$((STATE_FAIL_COUNT + 1))
   STATE_LAST_DETAIL="$details"
   STATE_LAST_SEEN="$(date +%s)"
 
   if (( STATE_FAIL_COUNT >= failure_threshold )) && [[ "$STATE_ACTIVE" != "1" ]]; then
-    if send_notification "ALERT" "$check_id" "$label" "$details"; then
+    blocker="$(failing_dependency "$check_id")"
+    if [[ -n "$blocker" ]]; then
+      if [[ "$STATE_SUPPRESSED" != "1" ]]; then
+        STATE_SUPPRESSED=1
+        log "Alert for '${check_id}' suppressed: dependency '${blocker}' is failing."
+        record_event "SUPPRESSED" "$check_id" "$label" "dependency:${blocker}" "$details"
+      fi
+    elif send_notification "ALERT" "$check_id" "$label" "$details"; then
       STATE_ACTIVE=1
+      STATE_SUPPRESSED=0
     fi
   fi
 
@@ -424,6 +497,7 @@ mark_success_loaded() {
   STATE_FAIL_COUNT=0
   STATE_LAST_DETAIL=""
   STATE_LAST_SEEN="$(date +%s)"
+  STATE_SUPPRESSED=0
 
   if [[ "$STATE_ACTIVE" == "1" ]]; then
     if send_notification "RESOLVED" "$check_id" "$label" "$details"; then
@@ -434,42 +508,30 @@ mark_success_loaded() {
   save_state "$check_id"
 }
 
+# One `docker inspect` for every container per run instead of one per check.
+load_container_cache() {
+  local name container_status health_status ids
+
+  ((CONTAINER_CACHE_LOADED == 0)) || return 0
+  CONTAINER_CACHE_LOADED=1
+
+  command -v docker >/dev/null 2>&1 || return 0
+  ids="$(docker ps -aq 2>/dev/null || true)"
+  [[ -n "$ids" ]] || return 0
+
+  while IFS='|' read -r name container_status health_status; do
+    [[ -n "$name" ]] || continue
+    CONTAINER_INFO["${name#/}"]="${container_status}|${health_status}"
+  done < <(docker inspect -f '{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' $ids 2>/dev/null || true)
+}
+
 run_container_check() {
   local check_id="$1"
   local container_name="${CHECK_PARAM_1[$check_id]}"
+  local mode="${CHECK_PARAM_2[$check_id]}"
+  local failure_threshold="${CHECK_PARAM_3[$check_id]:-1}"
   local label="${CHECK_LABEL[$check_id]}"
-  local status=""
-
-  load_state "$check_id"
-
-  if ! command -v docker >/dev/null 2>&1; then
-    mark_failure_loaded "$check_id" "$label" 1 "docker command is not available."
-    return
-  fi
-
-  status="$(docker inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
-
-  if [[ -z "$status" ]]; then
-    mark_failure_loaded "$check_id" "$label" 1 "Container '$container_name' is missing or docker inspect failed."
-    return
-  fi
-
-  if [[ "$status" != "running" ]]; then
-    mark_failure_loaded "$check_id" "$label" 1 "Container '$container_name' is in '$status' state."
-    return
-  fi
-
-  mark_success_loaded "$check_id" "$label" "Container '$container_name' is running again."
-}
-
-run_container_health_check() {
-  local check_id="$1"
-  local container_name="${CHECK_PARAM_1[$check_id]}"
-  local failure_threshold="${CHECK_PARAM_2[$check_id]}"
-  local label="${CHECK_LABEL[$check_id]}"
-  local inspect_output=""
-  local container_status=""
-  local health_status=""
+  local info container_status health_status
 
   load_state "$check_id"
 
@@ -478,32 +540,38 @@ run_container_health_check() {
     return
   fi
 
-  inspect_output="$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$container_name" 2>/dev/null || true)"
+  load_container_cache
+  info="${CONTAINER_INFO[$container_name]:-}"
 
-  if [[ -z "$inspect_output" ]]; then
+  if [[ -z "$info" ]]; then
     mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Container '$container_name' is missing or docker inspect failed."
     return
   fi
 
-  container_status="${inspect_output%%|*}"
-  health_status="${inspect_output#*|}"
+  container_status="${info%%|*}"
+  health_status="${info#*|}"
 
   if [[ "$container_status" != "running" ]]; then
     mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Container '$container_name' is in '$container_status' state."
     return
   fi
 
-  if [[ "$health_status" == "healthy" ]]; then
-    mark_success_loaded "$check_id" "$label" "Container '$container_name' health status is healthy again."
+  if [[ "$mode" != "health" ]]; then
+    mark_success_loaded "$check_id" "$label" "Container '$container_name' is running again."
     return
   fi
 
-  if [[ "$health_status" == "no-healthcheck" ]]; then
-    mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Container '$container_name' has no Docker healthcheck configured."
-    return
-  fi
-
-  mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Container '$container_name' health status is '$health_status'."
+  case "$health_status" in
+    healthy)
+      mark_success_loaded "$check_id" "$label" "Container '$container_name' health status is healthy again."
+      ;;
+    no-healthcheck)
+      mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Container '$container_name' has no Docker healthcheck configured."
+      ;;
+    *)
+      mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Container '$container_name' health status is '$health_status'."
+      ;;
+  esac
 }
 
 run_http_check() {
@@ -559,7 +627,7 @@ run_command_check() {
   output="$(bash -lc "$command_string" 2>&1)" || exit_code=$?
 
   if (( exit_code != 0 )); then
-    mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Command failed with exit code ${exit_code}: ${command_string}\n\n$(truncate_text "$output" 2500)"
+    mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Command failed with exit code ${exit_code}: ${command_string}${NL}${NL}$(truncate_text "$output" 2500)"
     return
   fi
 
@@ -568,7 +636,7 @@ run_command_check() {
   if [[ -n "$match_regex" ]]; then
     matched_lines="$(printf '%s\n' "$output" | grep -Ei -m 5 "$match_regex" || true)"
     if [[ -n "$matched_lines" ]]; then
-      mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Command matched '${match_regex}'.\n\n$(truncate_text "$matched_lines" 2500)"
+      mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Command matched '${match_regex}'.${NL}${NL}$(truncate_text "$matched_lines" 2500)"
       return
     fi
 
@@ -577,7 +645,7 @@ run_command_check() {
   fi
 
   if [[ -n "$non_empty_output" ]]; then
-    mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Command returned non-empty output.\n\n$(truncate_text "$non_empty_output" 2500)"
+    mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Command returned non-empty output.${NL}${NL}$(truncate_text "$non_empty_output" 2500)"
     return
   fi
 
@@ -684,53 +752,12 @@ run_resource_check() {
 
 run_log_check() {
   local check_id="$1"
-  local container_name="${CHECK_PARAM_1[$check_id]}"
-  local pattern="${CHECK_PARAM_2[$check_id]}"
-  local failure_threshold="${CHECK_PARAM_3[$check_id]}"
-  local initial_lookback_seconds="${CHECK_PARAM_4[$check_id]}"
-  local label="${CHECK_LABEL[$check_id]}"
-  local now since output="" exit_code=0 matched_lines=""
-
-  load_state "$check_id"
-
-  if ! command -v docker >/dev/null 2>&1; then
-    mark_failure_loaded "$check_id" "$label" "$failure_threshold" "docker command is not available, log checks cannot run."
-    return
-  fi
-
-  now="$(date +%s)"
-
-  if [[ "$STATE_LAST_CURSOR" =~ ^[0-9]+$ ]] && (( STATE_LAST_CURSOR > 0 )); then
-    since="$STATE_LAST_CURSOR"
-  else
-    since=$((now - initial_lookback_seconds))
-  fi
-
-  output="$(docker logs --since "$since" --timestamps "$container_name" 2>&1)" || exit_code=$?
-  STATE_LAST_CURSOR="$now"
-
-  if (( exit_code != 0 )); then
-    mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Unable to read logs from '$container_name' (exit code ${exit_code}).\n\n$(truncate_text "$output" 2500)"
-    return
-  fi
-
-  matched_lines="$(printf '%s\n' "$output" | grep -Ei -m 5 "$pattern" || true)"
-
-  if [[ -n "$matched_lines" ]]; then
-    mark_failure_loaded "$check_id" "$label" "$failure_threshold" "Found log matches in '$container_name' for pattern '${pattern}'.\n\n$(truncate_text "$matched_lines" 2500)"
-    return
-  fi
-
-  mark_success_loaded "$check_id" "$label" "No new log matches found in '$container_name' for pattern '${pattern}'."
-}
-
-run_file_error_check() {
-  local check_id="$1"
   local file_path="${CHECK_PARAM_1[$check_id]}"
   local include_regex="${CHECK_PARAM_2[$check_id]}"
   local exclude_regex="${CHECK_PARAM_3[$check_id]}"
   local label="${CHECK_LABEL[$check_id]}"
-  local is_first_run=0 file_size cursor new_content="" matched_lines="" match_count=0
+  local is_first_run=0 file_size cursor chunk chunk_size consumed partial_len new_content="" matched_lines="" match_count=0
+  local skipped_to_tail=0 blocker now sample
 
   # Checked before load_state (which would otherwise create/initialize the
   # state transparently) so we can tell "never run before" apart from "ran
@@ -770,23 +797,49 @@ run_file_error_check() {
     cursor=0
   fi
 
+  # Never pull more than FILE_ERROR_MAX_READ_BYTES into memory: after a huge
+  # burst, jump to the tail of the file and drop the first (partial) line.
+  if (( file_size - cursor > FILE_ERROR_MAX_READ_BYTES )); then
+    log "Check '$check_id': $((file_size - cursor)) new bytes in '$file_path', reading only the last ${FILE_ERROR_MAX_READ_BYTES}."
+    cursor=$((file_size - FILE_ERROR_MAX_READ_BYTES))
+    skipped_to_tail=1
+  fi
+
   if (( file_size > cursor )); then
-    new_content="$(tail -c "+$((cursor + 1))" "$file_path" 2>/dev/null || true)"
+    chunk="$(mktemp)"
+    tail -c "+$((cursor + 1))" "$file_path" 2>/dev/null | head -c "$FILE_ERROR_MAX_READ_BYTES" > "$chunk" || true
+    chunk_size="$(wc -c < "$chunk")"
+    chunk_size="${chunk_size//[[:space:]]/}"
+    consumed="$chunk_size"
+
+    # Only consume complete lines: a line the app is still writing is picked up
+    # whole on the next run instead of being split between two runs.
+    if (( chunk_size > 0 )) && [[ -n "$(tail -c 1 "$chunk")" ]]; then
+      partial_len="$(tail -n 1 "$chunk" | wc -c)"
+      partial_len="${partial_len//[[:space:]]/}"
+      if (( partial_len < chunk_size || chunk_size >= FILE_ERROR_MAX_READ_BYTES )); then
+        (( partial_len < chunk_size )) && consumed=$((chunk_size - partial_len))
+        head -c "$consumed" "$chunk" > "${chunk}.c" && mv "${chunk}.c" "$chunk"
+      else
+        consumed=0
+        : > "$chunk"
+      fi
+    fi
+
+    new_content="$(<"$chunk")"
+    rm -f "$chunk"
+    (( skipped_to_tail )) && new_content="$(printf '%s\n' "$new_content" | sed 1d)"
+    cursor=$((cursor + consumed))
   fi
 
   # Cursor always advances past everything we just read, whether or not it
   # matched the filters below — otherwise excluded/filtered lines would be
   # re-read (and re-considered) on every future run.
-  STATE_LAST_CURSOR="$file_size"
-  save_state "$check_id"
-
-  if [[ -z "$new_content" ]]; then
-    return
-  fi
+  STATE_LAST_CURSOR="$cursor"
 
   matched_lines="$new_content"
 
-  if [[ -n "$include_regex" ]]; then
+  if [[ -n "$include_regex" && -n "$matched_lines" ]]; then
     matched_lines="$(printf '%s\n' "$matched_lines" | grep -E "$include_regex" || true)"
   fi
 
@@ -794,13 +847,51 @@ run_file_error_check() {
     matched_lines="$(printf '%s\n' "$matched_lines" | grep -Ev "$exclude_regex" || true)"
   fi
 
+  now="$(date +%s)"
+
   if [[ -z "$matched_lines" ]]; then
+    # Quiet again: close the active alert after FILE_ERROR_QUIET_SECONDS without
+    # new matching lines and report how much was held back meanwhile.
+    if [[ "$STATE_ACTIVE" == "1" ]] && (( now - STATE_LAST_SEEN >= FILE_ERROR_QUIET_SECONDS )); then
+      if send_notification "RESOLVED" "$check_id" "$label" "No new matching lines in '${file_path}' for ${FILE_ERROR_QUIET_SECONDS}s. Lines not sent while the alert was active: ${STATE_SUPPRESSED_COUNT}.${NL}${NL}Last suppressed line:${NL}${STATE_SUPPRESSED_SAMPLE:-<none>}"; then
+        STATE_ACTIVE=0
+        STATE_SUPPRESSED_COUNT=0
+        STATE_SUPPRESSED_SAMPLE=""
+      fi
+    fi
+    save_state "$check_id"
     return
   fi
 
   match_count="$(printf '%s\n' "$matched_lines" | grep -c '.' || true)"
+  STATE_LAST_SEEN="$now"
 
-  send_notification "ALERT" "$check_id" "$label" "Found ${match_count} new matching line(s) in '${file_path}'.\n\n$(truncate_text "$matched_lines" 3000)" || true
+  if [[ "$STATE_ACTIVE" == "1" ]]; then
+    # Alert storm protection: an alert for this check is already out and not
+    # resolved yet, so new lines are only counted (the file itself keeps them).
+    sample="$(printf '%s\n' "$matched_lines" | tail -n 1)"
+    STATE_SUPPRESSED_COUNT=$((STATE_SUPPRESSED_COUNT + match_count))
+    STATE_SUPPRESSED_SAMPLE="$(truncate_text "$sample" 600)"
+    log "Check '${check_id}': ${match_count} new matching line(s) not sent, alert is already active."
+    record_event "SUPPRESSED" "$check_id" "$label" "alert-active" "${match_count} new matching line(s). Last: ${sample}"
+    save_state "$check_id"
+    return
+  fi
+
+  blocker="$(failing_dependency "$check_id")"
+  if [[ -n "$blocker" ]]; then
+    log "Alert for '${check_id}' suppressed: dependency '${blocker}' is failing."
+    record_event "SUPPRESSED" "$check_id" "$label" "dependency:${blocker}" "${match_count} new matching line(s) in '${file_path}'."
+    save_state "$check_id"
+    return
+  fi
+
+  if send_notification "ALERT" "$check_id" "$label" "Found ${match_count} new matching line(s) in '${file_path}'.${NL}${NL}$(truncate_text "$matched_lines" 3000)"; then
+    STATE_ACTIVE=1
+    STATE_SUPPRESSED_COUNT=0
+    STATE_SUPPRESSED_SAMPLE=""
+  fi
+  save_state "$check_id"
 }
 
 dispatch_check() {
@@ -810,9 +901,6 @@ dispatch_check() {
   case "$kind" in
     container)
       run_container_check "$check_id"
-      ;;
-    container_health)
-      run_container_health_check "$check_id"
       ;;
     http)
       run_http_check "$check_id"
@@ -829,13 +917,33 @@ dispatch_check() {
     log)
       run_log_check "$check_id"
       ;;
-    file_error)
-      run_file_error_check "$check_id"
-      ;;
     *)
       die "Unknown check kind '$kind' for '$check_id'."
       ;;
   esac
+}
+
+validate_dependencies() {
+  local check_id parent
+  local -a parents=()
+  local -A position=()
+  local index=0
+
+  for check_id in "${CHECK_ORDER[@]}"; do
+    position["$check_id"]=$index
+    index=$((index + 1))
+  done
+
+  for check_id in "${!CHECK_DEPENDS[@]}"; do
+    [[ -n "${position[$check_id]+x}" ]] || die "depends_on: unknown check '$check_id'."
+    IFS=' ' read -r -a parents <<< "${CHECK_DEPENDS[$check_id]}"
+    for parent in "${parents[@]}"; do
+      [[ -n "${position[$parent]+x}" ]] || die "depends_on: check '$check_id' depends on unknown check '$parent'."
+      [[ "$parent" != "$check_id" ]] || die "depends_on: check '$check_id' cannot depend on itself."
+      (( position[$parent] < position[$check_id] )) \
+        || die "depends_on: parent '$parent' must be registered before '$check_id' in the config (checks run in registration order)."
+    done
+  done
 }
 
 run_all_checks() {
@@ -881,6 +989,15 @@ finalize_runtime_settings() {
   DRY_RUN="${CLI_DRY_RUN:-${DRY_RUN:-0}}"
   mkdir -p "$STATE_DIR"
 
+  # A dry run behaves like a real one (alerts are "sent", cursors move), so it
+  # must never touch the real state: work on a throw-away copy.
+  if [[ "$DRY_RUN" == "1" ]]; then
+    DRY_STATE_DIR="$(mktemp -d)"
+    cp -a "$STATE_DIR/." "$DRY_STATE_DIR/" 2>/dev/null || true
+    trap 'rm -rf "$DRY_STATE_DIR"' EXIT
+    STATE_DIR="$DRY_STATE_DIR"
+  fi
+
   if [[ -n "${LOG_FILE:-}" ]]; then
     mkdir -p "$(dirname "$LOG_FILE")" || die "Cannot create log directory for '$LOG_FILE'."
     touch "$LOG_FILE" || die "Cannot write to LOG_FILE '$LOG_FILE'."
@@ -901,6 +1018,7 @@ finalize_runtime_settings() {
   fi
 
   ((${#CHECK_ORDER[@]} > 0)) || die "No checks were registered in '$CONFIG_FILE'."
+  validate_dependencies
 }
 
 main() {

@@ -15,22 +15,8 @@ CPU_USAGE_THRESHOLD=90
 MEMORY_USAGE_THRESHOLD=95
 RESOURCE_FAILURE_THRESHOLD=3
 CPU_SAMPLE_SECONDS=1
-LOG_INITIAL_LOOKBACK_SECONDS=300
 
-add_container_check "proxy" "proxy" "Docker: proxy"
-add_container_check "le" "le" "Docker: le"
-add_container_check "reports_nginx" "reports-nginx" "Docker: reports-nginx"
-add_container_check "reports_web" "reports-web" "Docker: reports-web"
-add_container_check "reports_php" "reports-php" "Docker: reports-php"
-add_container_check "reports_db" "reports-db" "Docker: reports-db"
-add_container_check "redirect" "redirect" "Docker: redirect"
-add_container_check "lifeorient" "lifeorient" "Docker: lifeorient"
-add_container_check "lifeorient_nginx" "lifeorient-nginx" "Docker: lifeorient-nginx"
-add_container_check "lifeorient_db" "lifeorient-db" "Docker: lifeorient-db"
-add_container_check "lifeorient_redirect" "lifeorient_redirect" "Docker: lifeorient_redirect"
-add_container_check "messenger_nginx" "messenger-nginx" "Docker: messenger-nginx"
-add_container_check "messenger_php" "messenger-php" "Docker: messenger-php"
-add_container_check "messenger_worker" "messenger-worker" "Docker: messenger-worker"
+add_containers proxy le reports-nginx reports-web reports-php reports-db redirect lifeorient lifeorient-nginx lifeorient-db lifeorient_redirect messenger-nginx messenger-php messenger-worker
 add_container_check "mp3" "mp3" "Docker: mp3 (j316.ru)"
 
 add_http_check "lifeorient_home" "https://lifeorient.org" "HTTP: lifeorient.org" 200 3 15
@@ -41,7 +27,7 @@ add_http_check "j316_home" "https://j316.ru" "HTTP: j316.ru" 302 3 15
 add_disk_check "root_disk" "/" "Disk: /" 95
 add_resource_check "host_resources" "Host resources" 90 95 3
 
-add_file_error_check \
+add_log_check \
   "reports_app_events" \
   "/root/reports/uploads/events.log" \
   "Errors: reports app" \
@@ -49,8 +35,7 @@ add_file_error_check \
   ""
 
 # --- SSH-туннель к домашнему сервису (d.lifeorient.org) ---
-add_container_check "tunnel_nginx" "tunnel-nginx" "Docker: tunnel-nginx"
-add_container_check "tunnel_cert_issuer" "tunnel-cert-issuer" "Docker: tunnel-cert-issuer"
+add_containers tunnel-nginx tunnel-cert-issuer
 # конец туннеля на VPS: если упало — проблема в SSH-туннеле или в домашнем сервисе
 add_http_check "tunnel_endpoint" "http://127.0.0.1:18443/health" "Tunnel: SSH-туннель / домашний сервис (127.0.0.1:18443)" 200 3 10
 # вся цепочка снаружи: DNS -> VPS -> TLS -> туннель -> дом
@@ -60,12 +45,12 @@ add_command_check "tunnel_cert_expiry" "echo | openssl s_client -connect 127.0.0
 
 # --- расширенные проверки сервиса материалов (дома) и второго адреса d.j316.ru ---
 add_http_check "tunnel_deep" "http://127.0.0.1:18443/api/health/full?key=replace-with-MONITOR_KEY" "Сервис дома: БД, конвертер, место на диске" 200 2 15
-add_container_check "tunnel_cert_issuer_j316" "tunnel-cert-issuer-j316" "Docker: tunnel-cert-issuer-j316"
+add_containers tunnel-cert-issuer-j316
 add_http_check "tunnel_public_j316" "https://d.j316.ru:8443/health" "HTTP: d.j316.ru:8443 (через туннель)" 200 3 15
 add_command_check "tunnel_cert_expiry_j316" "echo | openssl s_client -connect 127.0.0.1:8443 -servername d.j316.ru 2>/dev/null | openssl x509 -noout -checkend 1209600 >/dev/null || echo \"cert d.j316.ru expires in <14 days or unreachable\"" "Cert: d.j316.ru" ""
 
 # --- бот-помощник волонтёров (reports-helper) ---
-add_container_check "reports_helper" "reports-helper" "Docker: reports-helper"
+add_containers reports-helper
 # бот раз в 5 минут пишет tg_probe ok|SLOW|FAIL (запрос getMe к Telegram); тревога, если ПОСЛЕДНЯЯ проверка за 15 минут — FAIL
 # (пока в логе не появится ok, проверка остаётся в тревоге; сам алерт уходит в Telegram и при полной блокировке может не дойти)
 add_command_check "reports_helper_tg_fail" "docker logs --since 15m reports-helper 2>&1 | grep tg_probe | tail -1 | grep FAIL || true" "Bot: нет связи с Telegram (tg_probe FAIL)" "" 1
@@ -73,3 +58,23 @@ add_command_check "reports_helper_tg_fail" "docker logs --since 15m reports-help
 add_command_check "reports_helper_tg_silent" "docker logs --since 15m reports-helper 2>&1 | grep -q tg_probe || echo 'нет строк tg_probe за 15 минут: бот завис или перезапускается'" "Bot: нет проверок связи (tg_probe)" "" 2
 # docker HEALTHCHECK бота (файл /tmp/alive обновляется раз в 30 с); 3 минуты подряд не healthy — тревога
 add_container_health_check "reports_helper_health" "reports-helper" "Docker health: reports-helper" 3
+
+# --- зависимости алертов ---
+# Если сломалось более общее (контейнер, прокси, туннель до дома), зависимые
+# проверки не шлют свои алерты: шум не нужен, причина уже в одном сообщении.
+# Если зависимая проверка продолжит падать после восстановления родителя — алерт придёт тогда.
+# Родитель должен быть объявлен в конфиге выше зависимого.
+depends_on "reports_home"  "proxy" "reports_web"
+depends_on "reports_api"   "proxy" "reports_nginx" "reports_php" "reports_db"
+depends_on "lifeorient_home" "proxy" "lifeorient_nginx" "lifeorient" "lifeorient_db"
+depends_on "j316_home"     "proxy" "mp3"
+# туннель до домашнего lifeorient-storage: когда дом недоступен (tunnel_endpoint), всё, что идёт через него, молчит
+depends_on "tunnel_public"      "tunnel_endpoint" "tunnel_nginx"
+depends_on "tunnel_public_j316" "tunnel_endpoint" "tunnel_nginx"
+depends_on "tunnel_deep"        "tunnel_endpoint"
+depends_on "tunnel_cert_expiry"      "tunnel_nginx"
+depends_on "tunnel_cert_expiry_j316" "tunnel_nginx"
+# бот-помощник
+depends_on "reports_helper_tg_fail"   "reports_helper"
+depends_on "reports_helper_tg_silent" "reports_helper"
+depends_on "reports_helper_health"    "reports_helper"

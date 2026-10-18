@@ -23,7 +23,6 @@ CPU_USAGE_THRESHOLD=90
 MEMORY_USAGE_THRESHOLD=90
 RESOURCE_FAILURE_THRESHOLD=3
 CPU_SAMPLE_SECONDS=1
-LOG_INITIAL_LOOKBACK_SECONDS=300
 
 # Container checks.
 add_container_check "nginx_container" "nginx" "Docker: nginx"
@@ -59,20 +58,17 @@ add_disk_check "root_disk" "/" "Disk: /" 90
 # Host CPU and memory.
 add_resource_check "host_resources" "Host resources" 90 90 3
 
-# Log monitoring. The script inspects only new log lines since the previous run.
-add_log_check "php_exceptions" "php-fpm" "exception|fatal error|traceback" "Logs: php-fpm exceptions" 1 300
-
-# File-based error monitoring: not tied to docker logs or any one service.
-# Point it at any plain log file on the host and it notifies once per run
-# that has new matching lines (not an ALERT-once/RESOLVED pair like
-# add_log_check above) — meant for "tell me about every new error", e.g. a
-# JSON-lines error/event log written by an app. Works for any number of
-# files from any number of services, one add_file_error_check per file.
-#   add_file_error_check <id> <file_path> [label] [include_regex] [exclude_regex]
+# Log monitoring: point it at any plain log file on the host (one event per
+# line works best, e.g. a JSON-lines error/event log written by an app); only
+# lines appended since the previous run are inspected. The first run with new
+# matching lines sends an ALERT; while it is active further lines are only
+# counted, and after FILE_ERROR_QUIET_SECONDS without new matches a RESOLVED
+# summary follows. One add_log_check per file.
+#   add_log_check <id> <file_path> [label] [include_regex] [exclude_regex]
 # include_regex: only consider new lines matching this (empty = all new lines).
 # exclude_regex: drop lines matching this even if include_regex matched — this
 #   is how you silence specific error types without touching the app's code.
-add_file_error_check \
+add_log_check \
   "app_events_example" \
   "/var/www/app/uploads/events.log" \
   "Errors: app events" \
@@ -83,7 +79,7 @@ add_file_error_check \
 # ("warning"/"error"/"critical"), you can filter on severity instead of (or
 # together with) specific error types — e.g. only page for critical/error,
 # stay quiet on routine warnings like an expired token or bad login:
-# add_file_error_check \
+# add_log_check \
 #   "app_events_critical_only" \
 #   "/var/www/app/uploads/events.log" \
 #   "Errors: app events (critical+error only)" \
