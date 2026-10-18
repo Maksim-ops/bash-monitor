@@ -28,7 +28,7 @@ Simple cron-driven monitoring in Bash for Docker containers, HTTP endpoints, MyS
 - Sends a resolved message when the state returns to normal.
 - Dependencies between checks (`depends_on`): when a more general check is
   failing (a container, the proxy, the tunnel to the home server), checks that
-  depend on it do not send their own alerts.
+  depend on it are skipped and send no alerts of their own.
 
 ## Setup
 
@@ -138,10 +138,11 @@ add_log_check \
 depends_on "tunnel_public" "tunnel_endpoint" "tunnel_nginx"
 ```
 
-While any of the listed parent checks is failing (alert active, or at least one failed run), the dependent check does not send an ALERT. It is journaled once as `SUPPRESSED ... dependency:<parent>`. Details:
+While any of the listed parent checks is failing (alert active, or at least one failed run), the dependent check is **not run at all**: it would fail for the same reason, and HTTP checks would only burn time on their timeouts. The skip is logged and journaled once per outage as `SKIPPED ... dependency:<parent>`. Details:
 
-- A parent counts as failing as soon as it has a failed run, even before its own failure threshold is reached, so a dependent with a lower threshold does not alert in the gap.
-- If the dependent is still failing after the parent recovers, it sends its own ALERT then. A dependent that never alerted sends no RESOLVED.
+- The dependent's state is left untouched while it is skipped, so it starts counting from scratch when the parent is back: after recovery it runs on the next run and alerts only after its own failure threshold. A dependent that never alerted sends no RESOLVED.
+- A parent counts as failing as soon as it has a failed run, even before its own failure threshold is reached, so a short flake of the parent also skips its dependents for that run.
+- A dependent that was already alerting stays in that state during the outage and resolves normally once it runs and passes again.
 - A parent must be registered before its dependents in the config (checks run in registration order); `monitor.sh` refuses to start otherwise, and also on unknown ids.
 - Dependencies can be chained (a parent may itself depend on another check).
 

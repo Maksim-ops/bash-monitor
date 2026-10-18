@@ -169,11 +169,12 @@ add_containers() {
   done
 }
 
-# Alerts of <check_id> are not sent while any of the listed parent checks is
-# failing (its state is active or has failures): when a more general thing is
-# down, the checks that depend on it stay quiet. A parent must be registered
-# (run) before its dependents. If the dependent is still failing after the
-# parent recovers, it alerts then.
+# <check_id> is not run (so it cannot alert) while any of the listed parent
+# checks is failing (alert active or at least one failed run): when a more
+# general thing is down, the checks that depend on it stay quiet and do not
+# waste time on timeouts. A parent must be registered (run) before its
+# dependents. When the parent recovers the dependent runs again and, if it is
+# still failing, alerts after its own threshold.
 depends_on() {
   local check_id="${1:?check id is required}"
   local parent
@@ -461,23 +462,14 @@ mark_failure_loaded() {
   local label="$2"
   local failure_threshold="$3"
   local details="$4"
-  local blocker
 
   STATE_FAIL_COUNT=$((STATE_FAIL_COUNT + 1))
   STATE_LAST_DETAIL="$details"
   STATE_LAST_SEEN="$(date +%s)"
 
   if (( STATE_FAIL_COUNT >= failure_threshold )) && [[ "$STATE_ACTIVE" != "1" ]]; then
-    blocker="$(failing_dependency "$check_id")"
-    if [[ -n "$blocker" ]]; then
-      if [[ "$STATE_SUPPRESSED" != "1" ]]; then
-        STATE_SUPPRESSED=1
-        log "Alert for '${check_id}' suppressed: dependency '${blocker}' is failing."
-        record_event "SUPPRESSED" "$check_id" "$label" "dependency:${blocker}" "$details"
-      fi
-    elif send_notification "ALERT" "$check_id" "$label" "$details"; then
+    if send_notification "ALERT" "$check_id" "$label" "$details"; then
       STATE_ACTIVE=1
-      STATE_SUPPRESSED=0
     fi
   fi
 
@@ -492,7 +484,6 @@ mark_success_loaded() {
   STATE_FAIL_COUNT=0
   STATE_LAST_DETAIL=""
   STATE_LAST_SEEN="$(date +%s)"
-  STATE_SUPPRESSED=0
 
   if [[ "$STATE_ACTIVE" == "1" ]]; then
     if send_notification "RESOLVED" "$check_id" "$label" "$details"; then
@@ -752,7 +743,7 @@ run_log_check() {
   local exclude_regex="${CHECK_PARAM_3[$check_id]}"
   local label="${CHECK_LABEL[$check_id]}"
   local is_first_run=0 file_size cursor chunk chunk_size consumed partial_len new_content="" matched_lines="" match_count=0
-  local skipped_to_tail=0 blocker now sample
+  local skipped_to_tail=0 now sample
 
   # Checked before load_state (which would otherwise create/initialize the
   # state transparently) so we can tell "never run before" apart from "ran
@@ -873,14 +864,6 @@ run_log_check() {
     return
   fi
 
-  blocker="$(failing_dependency "$check_id")"
-  if [[ -n "$blocker" ]]; then
-    log "Alert for '${check_id}' suppressed: dependency '${blocker}' is failing."
-    record_event "SUPPRESSED" "$check_id" "$label" "dependency:${blocker}" "${match_count} new matching line(s) in '${file_path}'."
-    save_state "$check_id"
-    return
-  fi
-
   if send_notification "ALERT" "$check_id" "$label" "Found ${match_count} new matching line(s) in '${file_path}'.${NL}${NL}$(truncate_text "$matched_lines" 3000)"; then
     STATE_ACTIVE=1
     STATE_SUPPRESSED_COUNT=0
@@ -941,10 +924,48 @@ validate_dependencies() {
   done
 }
 
+# A check whose parent (depends_on) is failing is not run at all: it would fail
+# for the same reason (and HTTP checks would just wait for their timeouts). Its
+# state is left untouched, so it starts counting again once the parent is back.
+# SUPPRESSED=1 in its state marks "currently skipped" so that the skip is logged
+# (and journaled) once per outage, not every minute.
+skip_dependent_check() {
+  local check_id="$1"
+  local blocker="$2"
+
+  load_state "$check_id"
+  if [[ "$STATE_SUPPRESSED" != "1" ]]; then
+    STATE_SUPPRESSED=1
+    log "Check '${check_id}' skipped: dependency '${blocker}' is failing."
+    record_event "SKIPPED" "$check_id" "${CHECK_LABEL[$check_id]}" "dependency:${blocker}" "Not run while '${blocker}' is failing."
+    save_state "$check_id"
+  fi
+}
+
+resume_dependent_check() {
+  local check_id="$1"
+
+  load_state "$check_id"
+  if [[ "$STATE_SUPPRESSED" == "1" ]]; then
+    STATE_SUPPRESSED=0
+    log "Check '${check_id}' resumed: its dependencies are healthy again."
+    save_state "$check_id"
+  fi
+}
+
 run_all_checks() {
-  local check_id
+  local check_id blocker
 
   for check_id in "${CHECK_ORDER[@]}"; do
+    if [[ -n "${CHECK_DEPENDS[$check_id]:-}" ]]; then
+      blocker="$(failing_dependency "$check_id")"
+      if [[ -n "$blocker" ]]; then
+        skip_dependent_check "$check_id" "$blocker"
+        continue
+      fi
+      resume_dependent_check "$check_id"
+    fi
+
     if ! dispatch_check "$check_id"; then
       log "Check '$check_id' crashed unexpectedly."
     fi

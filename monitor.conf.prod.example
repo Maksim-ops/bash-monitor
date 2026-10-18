@@ -21,7 +21,8 @@ add_container_check "mp3" "mp3" "Docker: mp3 (j316.ru)"
 
 add_http_check "lifeorient_home" "https://lifeorient.org" "HTTP: lifeorient.org" 200 3 15
 add_http_check "reports_home" "https://reports.lifeorient.org" "HTTP: reports.lifeorient.org" 200 3 15
-add_http_check "reports_api" "https://api.reports.lifeorient.org" "HTTP: api.reports.lifeorient.org" 401 3 15
+# /auth/check без токена отдаёт 401 (корень API отдаёт 404, ждать 401 от него нельзя)
+add_http_check "reports_api" "https://api.reports.lifeorient.org/auth/check" "HTTP: api.reports.lifeorient.org (/auth/check)" 401 3 15
 add_http_check "j316_home" "https://j316.ru" "HTTP: j316.ru" 302 3 15
 
 add_disk_check "root_disk" "/" "Disk: /" 95
@@ -74,9 +75,9 @@ add_command_check "reports_helper_tg_silent" "docker logs --since 15m reports-he
 add_container_health_check "reports_helper_health" "reports-helper" "Docker health: reports-helper" 3
 
 # --- зависимости алертов ---
-# Если сломалось более общее (контейнер, прокси, туннель до дома), зависимые
-# проверки не шлют свои алерты: шум не нужен, причина уже в одном сообщении.
-# Если зависимая проверка продолжит падать после восстановления родителя — алерт придёт тогда.
+# Если сломалось более общее (контейнер, прокси, туннель до дома), зависимые проверки
+# не выполняются вообще (они упали бы по той же причине, а HTTP-проверки ждали бы таймауты).
+# После восстановления родителя они запускаются снова и алертят по своему порогу, если всё ещё падают.
 # Родитель должен быть объявлен в конфиге выше зависимого.
 depends_on "reports_home"  "proxy" "reports_web"
 depends_on "reports_api"   "proxy" "reports_nginx" "reports_php" "reports_db"
