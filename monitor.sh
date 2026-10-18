@@ -33,6 +33,9 @@ RESOURCE_FAILURE_THRESHOLD="${RESOURCE_FAILURE_THRESHOLD:-3}"
 CPU_SAMPLE_SECONDS="${CPU_SAMPLE_SECONDS:-1}"
 LOG_INITIAL_LOOKBACK_SECONDS="${LOG_INITIAL_LOOKBACK_SECONDS:-300}"
 TELEGRAM_TIMEOUT="${TELEGRAM_TIMEOUT:-15}"
+# Seconds to wait before each retry of a failed Telegram send; the number of
+# retries is the number of values ("10 20" = up to 3 tries in total).
+TELEGRAM_RETRY_DELAYS="${TELEGRAM_RETRY_DELAYS:-10 20}"
 
 declare -a CHECK_ORDER=()
 declare -A CHECK_KIND=()
@@ -225,6 +228,7 @@ record_event() {
   local label="$3"
   local status="$4"
   local details="$5"
+  local attempts="${6:-1}"
   local line
 
   [[ -n "${EVENTS_LOG_FILE:-}" ]] || return 0
@@ -233,8 +237,8 @@ record_event() {
   details="${details//\\n/ | }"
   details="${details//$'\n'/ | }"
 
-  printf -v line '[%s] %s check=%s label="%s" host=%s status=%s details=%s\n' \
-    "$(timestamp)" "$severity" "$check_id" "$label" "$HOSTNAME_LABEL" "$status" "$details"
+  printf -v line '[%s] %s check=%s label="%s" host=%s status=%s attempts=%s details=%s\n' \
+    "$(timestamp)" "$severity" "$check_id" "$label" "$HOSTNAME_LABEL" "$status" "$attempts" "$details"
   printf '%s' "$line" >> "$EVENTS_LOG_FILE" 2>/dev/null || true
 }
 
@@ -322,14 +326,30 @@ send_notification() {
     curl_args+=(-d "disable_notification=true")
   fi
 
-  if ! curl "${curl_args[@]}" >/dev/null; then
-    log "Telegram send failed for '$check_id'."
-    record_event "$severity" "$check_id" "$label" "failed" "$details"
-    return 1
-  fi
+  # A transient Telegram/network hiccup should not lose the alert: retry a few
+  # times before giving up. This matters most for file-error checks, which move
+  # their cursor past the lines regardless of delivery (the events journal is
+  # then the only place the alert survives).
+  local -a retry_delays=()
+  IFS=' ' read -r -a retry_delays <<< "$TELEGRAM_RETRY_DELAYS"
+  local attempt=1
+  local max_attempts=$(( ${#retry_delays[@]} + 1 ))
+  local retry_delay
+  until curl "${curl_args[@]}" >/dev/null; do
+    if (( attempt >= max_attempts )); then
+      log "Telegram send failed for '$check_id' after ${attempt} attempt(s)."
+      record_event "$severity" "$check_id" "$label" "failed" "$details" "$attempt"
+      return 1
+    fi
+
+    retry_delay="${retry_delays[$((attempt - 1))]}"
+    log "Telegram send attempt ${attempt}/${max_attempts} failed for '$check_id', retrying in ${retry_delay}s."
+    sleep "$retry_delay"
+    attempt=$((attempt + 1))
+  done
 
   log "${severity} notification sent for '${check_id}'."
-  record_event "$severity" "$check_id" "$label" "sent" "$details"
+  record_event "$severity" "$check_id" "$label" "sent" "$details" "$attempt"
   return 0
 }
 

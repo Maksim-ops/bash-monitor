@@ -6,6 +6,8 @@ TELEGRAM_CHAT_ID="-1001234567890"
 # Optional settings.
 # TELEGRAM_MESSAGE_THREAD_ID="42"
 # TELEGRAM_DISABLE_NOTIFICATION=1
+# Pauses (seconds) before each retry of a failed Telegram send; default "10 20" = 3 tries in total:
+# TELEGRAM_RETRY_DELAYS="10 20"
 # LOG_FILE="/var/log/lifeorient-monitor.log"
 # Journal of every ALERT/RESOLVED with full details (default: <LOG_FILE minus .log>-events.log):
 # EVENTS_LOG_FILE="/var/log/lifeorient-monitor-events.log"

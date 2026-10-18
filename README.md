@@ -55,16 +55,20 @@ chmod +x monitor.sh
 
 If `LOG_FILE` is set inside the config, the script also writes its own start/end and notification events to that file.
 
+## Telegram retries
+
+A failed Telegram send is retried after the pauses listed in `TELEGRAM_RETRY_DELAYS` (seconds, default `"10 20"`): the first retry is 10 s after the first failure, the second 20 s after the second one, so up to 3 tries in total. The number of values is the number of retries (empty = no retries). Each try is bounded by `TELEGRAM_TIMEOUT` (default 15), so a fully unreachable Telegram can hold one notification for roughly 75 s with the defaults. That blocks the rest of the run, and the run lock makes the next cron run exit early meanwhile (the checks catch up on the following run).
+
 ## Alert journal
 
 Every ALERT and RESOLVED the monitor decides to send is also recorded, with the full text of what it saw, in a separate one-event-per-line file:
 
 ```
-[2026-10-18 21:58:27 +0300] ALERT check=reports_app_events label="Errors: reports app" host=lifeorient status=sent details=Found 2 new matching line(s) ... | {"ts":...}
-[2026-10-18 21:58:27 +0300] RESOLVED check=reports_db label="Docker: reports-db" host=lifeorient status=sent details=Container 'reports-db' is running again.
+[2026-10-18 21:58:27 +0300] ALERT check=reports_app_events label="Errors: reports app" host=lifeorient status=sent attempts=1 details=Found 2 new matching line(s) ... | {"ts":...}
+[2026-10-18 21:58:27 +0300] RESOLVED check=reports_db label="Docker: reports-db" host=lifeorient status=sent attempts=1 details=Container 'reports-db' is running again.
 ```
 
-- `status=sent` - delivered to Telegram; `status=failed` - the monitor wanted to send it but Telegram delivery failed (so the journal is the source of truth if a message never reached the chat). A failed ALERT/RESOLVED is retried on the next run and recorded again.
+- `status=sent` - delivered to Telegram; `status=failed` - the monitor wanted to send it but Telegram delivery failed even after retries (so the journal is the source of truth if a message never reached the chat). `attempts=N` is how many sends it took. A failed ALERT/RESOLVED of a state check is retried on the next run and recorded again; a failed file-error alert is not (its cursor has already moved on), it survives only in the journal.
 - Newlines inside `details` are replaced with ` | `.
 - Path: `EVENTS_LOG_FILE` in `monitor.conf`. If it is not set but `LOG_FILE` is, it defaults to `<LOG_FILE without .log>-events.log` (e.g. `/var/log/lifeorient-monitor-events.log`). Without both, the journal is off.
 - `--dry-run` does not write to the journal.
