@@ -16,7 +16,7 @@ MEMORY_USAGE_THRESHOLD=95
 RESOURCE_FAILURE_THRESHOLD=3
 CPU_SAMPLE_SECONDS=1
 
-add_containers proxy le reports-nginx reports-web reports-php reports-db redirect lifeorient lifeorient-nginx lifeorient-db lifeorient_redirect messenger-nginx messenger-php messenger-worker
+add_containers proxy le reports-nginx reports-web reports-php reports-db redirect lifeorient lifeorient-nginx lifeorient-db lifeorient_redirect messenger-nginx messenger-api messenger-worker
 add_container_check "mp3" "mp3" "Docker: mp3 (j316.ru)"
 
 add_http_check "lifeorient_home" "https://lifeorient.org" "HTTP: lifeorient.org" 200 3 15
@@ -47,7 +47,8 @@ add_log_check "messenger_telegram_log" "/root/messenger-api/logs/telegram.log" "
 # (предупреждения WordPress вроде "PHP Warning ... class-wp-site-health.php" сознательно не ловим — это шум)
 add_command_check "reports_php_errors" "docker logs --since 5m reports-php 2>&1 | grep -E 'PHP (Fatal|Parse) error|Fatal error|Uncaught|segfault|exited on signal|server reached pm\\.max_children' | cut -c1-300 | tail -3" "PHP: reports-php errors" "" 1
 add_command_check "lifeorient_php_errors" "docker logs --since 5m lifeorient 2>&1 | grep -E 'PHP (Fatal|Parse) error|Fatal error|Uncaught|segfault|exited on signal|server reached pm\\.max_children' | cut -c1-300 | tail -3" "PHP: lifeorient (WordPress) errors" "" 1
-add_command_check "messenger_php_errors" "docker logs --since 5m messenger-php 2>&1 | grep -E 'PHP (Fatal|Parse) error|Fatal error|Uncaught|segfault|exited on signal|server reached pm\\.max_children' | cut -c1-300 | tail -3" "PHP: messenger-php errors" "" 1
+# API мессенджера (FastAPI) пишет в docker logs: 5xx и необработанные исключения за последние 5 минут
+add_command_check "messenger_api_errors" "docker logs --since 5m messenger-api 2>&1 | grep -E '\\[(ERROR|CRITICAL)\\]|Traceback' | cut -c1-300 | tail -3" "API: messenger-api errors" "" 1
 
 # --- SSH-туннель к домашнему сервису (d.lifeorient.org) ---
 add_containers tunnel-nginx tunnel-cert-issuer
@@ -94,7 +95,7 @@ depends_on "reports_nginx_errors"   "reports_php"
 depends_on "wordpress_nginx_errors" "lifeorient"
 depends_on "reports_php_errors"    "reports_php"
 depends_on "lifeorient_php_errors" "lifeorient"
-depends_on "messenger_php_errors"  "messenger_php"
+depends_on "messenger_api_errors"  "messenger_api"
 # бот-помощник
 depends_on "reports_helper_tg_fail"   "reports_helper"
 depends_on "reports_helper_tg_silent" "reports_helper"
