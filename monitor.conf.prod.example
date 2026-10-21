@@ -49,6 +49,8 @@ add_command_check "reports_php_errors" "docker logs --since 5m reports-php 2>&1 
 add_command_check "lifeorient_php_errors" "docker logs --since 5m lifeorient 2>&1 | grep -E 'PHP (Fatal|Parse) error|Fatal error|Uncaught|segfault|exited on signal|server reached pm\\.max_children' | cut -c1-300 | tail -3" "PHP: lifeorient (WordPress) errors" "" 1
 # API мессенджера (FastAPI) пишет в docker logs: 5xx и необработанные исключения за последние 5 минут
 add_command_check "messenger_api_errors" "docker logs --since 5m messenger-api 2>&1 | grep -E '\\[(ERROR|CRITICAL)\\]|Traceback' | cut -c1-300 | tail -3" "API: messenger-api errors" "" 1
+# очередь мессенджера: самое старое незавершённое сообщение старше 15 минут (воркер завис или сообщение застряло). Молчит, пока всё в порядке
+add_command_check "messenger_queue_stuck" "docker exec messenger-worker python -m worker.queue_check --max-age 900" "Queue: messenger stuck" "" 1
 
 # --- SSH-туннель к домашнему сервису (d.lifeorient.org) ---
 add_containers tunnel-nginx tunnel-cert-issuer
@@ -96,6 +98,7 @@ depends_on "wordpress_nginx_errors" "lifeorient"
 depends_on "reports_php_errors"    "reports_php"
 depends_on "lifeorient_php_errors" "lifeorient"
 depends_on "messenger_api_errors"  "messenger_api"
+depends_on "messenger_queue_stuck"  "messenger_worker"
 # бот-помощник
 depends_on "reports_helper_tg_fail"   "reports_helper"
 depends_on "reports_helper_tg_silent" "reports_helper"
