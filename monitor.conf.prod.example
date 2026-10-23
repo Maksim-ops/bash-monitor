@@ -16,7 +16,7 @@ MEMORY_USAGE_THRESHOLD=95
 RESOURCE_FAILURE_THRESHOLD=3
 CPU_SAMPLE_SECONDS=1
 
-add_containers proxy le reports-nginx reports-web reports-php reports-db redirect lifeorient lifeorient-nginx lifeorient-db lifeorient_redirect messenger-nginx messenger-api messenger-worker
+add_containers proxy le reports-nginx reports-web reports-php reports-db redirect lifeorient lifeorient-nginx lifeorient-db lifeorient_redirect messenger-api messenger-worker
 add_container_check "mp3" "mp3" "Docker: mp3 (j316.ru)"
 
 add_http_check "lifeorient_home" "https://lifeorient.org" "HTTP: lifeorient.org" 200 3 15
