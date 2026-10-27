@@ -1,1 +1,1 @@
-* * * * * root /root/monitor/monitor.sh --config /root/monitor/monitor.conf >/dev/null 2>&1
+* * * * * root /root/monitor/monitor.sh --config /root/monitor/monitor.conf >> /var/log/lifeorient-monitor-cron.log 2>&1

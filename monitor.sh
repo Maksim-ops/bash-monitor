@@ -330,7 +330,7 @@ send_notification() {
 
   local url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
   local -a curl_args=(
-    -fsS
+    -sS
     --max-time "$TELEGRAM_TIMEOUT"
     -X POST
     "$url"
@@ -359,8 +359,25 @@ send_notification() {
   local attempt=1
   local max_attempts=$(( ${#retry_delays[@]} + 1 ))
   local retry_delay
-  until curl "${curl_args[@]}" >/dev/null; do
+  # Every attempt is logged with curl's exit code, stderr, HTTP status, timings and the
+  # response body, so a "failed" send can be told apart from a delivered one whose
+  # reply never arrived (timeout / connection reset after the request was sent).
+  local curl_out curl_err curl_rc curl_err_file
+  curl_err_file="$(mktemp)"
+  while true; do
+    curl_rc=0
+    curl_out="$(curl "${curl_args[@]}" -w $'\nHTTP=%{http_code} connect=%{time_connect}s total=%{time_total}s' 2>"$curl_err_file")" || curl_rc=$?
+    curl_err="$(<"$curl_err_file")"
+    # без -f тело ответа Telegram остаётся в логе; HTTP-ошибку (не 2xx) считаем неудачей сами
+    if (( curl_rc == 0 )) && [[ "${curl_out##*HTTP=}" != 2* ]]; then curl_rc=22; fi
+    curl_out="${curl_out//$TELEGRAM_BOT_TOKEN/<token>}"
+    curl_err="${curl_err//$TELEGRAM_BOT_TOKEN/<token>}"
+    curl_out="${curl_out//$'\n'/ }"
+    curl_err="${curl_err//$'\n'/ }"
+    log "Telegram send '$check_id' attempt ${attempt}/${max_attempts}: curl_exit=${curl_rc} response: $(truncate_text "$curl_out" 400) stderr: $(truncate_text "${curl_err:-<empty>}" 400)"
+    (( curl_rc == 0 )) && break
     if (( attempt >= max_attempts )); then
+      rm -f "$curl_err_file"
       log "Telegram send failed for '$check_id' after ${attempt} attempt(s)."
       record_event "$severity" "$check_id" "$label" "failed" "$details" "$attempt"
       return 1
@@ -371,6 +388,7 @@ send_notification() {
     sleep "$retry_delay"
     attempt=$((attempt + 1))
   done
+  rm -f "$curl_err_file"
 
   log "${severity} notification sent for '${check_id}'."
   record_event "$severity" "$check_id" "$label" "sent" "$details" "$attempt"
