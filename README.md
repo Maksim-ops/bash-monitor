@@ -61,6 +61,8 @@ If `LOG_FILE` is set inside the config, the script also writes its own start/end
 
 A failed Telegram send is retried after the pauses listed in `TELEGRAM_RETRY_DELAYS` (seconds, default `"10 20"`): the first retry is 10 s after the first failure, the second 20 s after the second one, so up to 3 tries in total. The number of values is the number of retries (empty = no retries). Each try is bounded by `TELEGRAM_TIMEOUT` (default 15), so a fully unreachable Telegram can hold one notification for roughly 75 s with the defaults. That blocks the rest of the run, and the run lock makes the next cron run exit early meanwhile (the checks catch up on the following run).
 
+Every send attempt is written to `LOG_FILE` with curl's exit code, HTTP status, timings, the response body and curl's stderr (the bot token is masked). A try that timed out on the reply can still have been delivered, so duplicate messages are possible while Telegram is slow; a larger `TELEGRAM_TIMEOUT` reduces them. The cron entry in `lifeorient-monitor.cron` appends the script's stdout/stderr to `/var/log/lifeorient-monitor-cron.log` instead of discarding it.
+
 ## Alert journal
 
 Every ALERT and RESOLVED the monitor decides to send is also recorded, with the full text of what it saw, in a separate one-event-per-line file:
