@@ -90,7 +90,7 @@ depends_on "reports_home"  "proxy" "reports_web"
 depends_on "reports_api"   "proxy" "reports_nginx" "reports_php" "reports_db"
 depends_on "lifeorient_home" "proxy" "lifeorient_nginx" "lifeorient" "lifeorient_db"
 depends_on "j316_home"     "proxy" "mp3"
-# туннель до домашнего lifeorient-storage: когда дом недоступен (tunnel_endpoint), всё, что идёт через него, молчит
+# туннель до домашнего nas-storage: когда дом недоступен (tunnel_endpoint), всё, что идёт через него, молчит
 depends_on "tunnel_public"      "tunnel_endpoint" "tunnel_nas"
 depends_on "tunnel_public_j316" "tunnel_endpoint" "tunnel_nas"
 depends_on "tunnel_deep"        "tunnel_endpoint"
