@@ -120,7 +120,7 @@ Log file check with filtering (not tied to Docker or a specific service — any 
 ```bash
 add_log_check \
   "reports_app_errors" \
-  "/root/reports/uploads/events.log" \
+  "/opt/reports/uploads/events.log" \
   "Errors: reports app" \
   "" \
   "\"context\":\"some_noisy_known_issue\""
