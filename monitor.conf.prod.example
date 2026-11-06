@@ -4,7 +4,7 @@ TELEGRAM_TIMEOUT=30   # таймаут одного запроса sendMessage, 
 
 ALERT_PREFIX="[lifeorient-monitor PROD]"
 HOSTNAME_LABEL="lifeorient"
-STATE_DIR="/root/monitor/.monitor-state"
+STATE_DIR="/opt/monitor/.monitor-state"
 LOG_FILE="/var/log/lifeorient-monitor.log"
 EVENTS_LOG_FILE="/var/log/lifeorient-monitor-events.log"
 
@@ -42,8 +42,8 @@ add_log_check \
 add_log_check "reports_nginx_errors" "/var/log/lifeorient/reports-nginx/error.log" "Errors: reports-nginx error.log" "\[(error|crit|alert|emerg)\]"
 add_log_check "wordpress_nginx_errors" "/var/log/lifeorient/wordpress-nginx/error.log" "Errors: wordpress-nginx error.log" "\[(error|crit|alert|emerg)\]" "access forbidden by rule|directory index of .* is forbidden|no user/password was provided for basic authentication|was not found in|password mismatch"
 # приложения мессенджера (сейчас в них только INFO)
-add_log_check "messenger_max_log" "/root/messenger-api/logs/max.log" "Errors: messenger max.log" "\[(WARNING|ERROR|CRITICAL)\]"
-add_log_check "messenger_telegram_log" "/root/messenger-api/logs/telegram.log" "Errors: messenger telegram.log" "\[(WARNING|ERROR|CRITICAL)\]"
+add_log_check "messenger_max_log" "/opt/messenger-api/logs/max.log" "Errors: messenger max.log" "\[(WARNING|ERROR|CRITICAL)\]"
+add_log_check "messenger_telegram_log" "/opt/messenger-api/logs/telegram.log" "Errors: messenger telegram.log" "\[(WARNING|ERROR|CRITICAL)\]"
 # PHP-FPM пишет только в docker logs (файла нет): фатальные ошибки, падения воркеров и нехватка pm.max_children за последние 5 минут
 # (предупреждения WordPress вроде "PHP Warning ... class-wp-site-health.php" сознательно не ловим — это шум)
 add_command_check "reports_php_errors" "docker logs --since 5m reports-php 2>&1 | grep -E 'PHP (Fatal|Parse) error|Fatal error|Uncaught|segfault|exited on signal|server reached pm\\.max_children' | cut -c1-300 | tail -3" "PHP: reports-php errors" "" 1
